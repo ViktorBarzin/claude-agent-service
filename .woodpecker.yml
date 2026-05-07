@@ -12,16 +12,11 @@ steps:
   - name: build-and-push
     image: woodpeckerci/plugin-docker-buildx
     settings:
-      # Dual-push during the Forgejo registry consolidation bake. After
-      # ≥14 days clean, registry.viktorbarzin.me drops out (Phase 4).
+      # Phase 4 of forgejo-registry-consolidation 2026-05-07 —
+      # registry.viktorbarzin.me decommissioned. Forgejo only.
       repo:
-        - registry.viktorbarzin.me/claude-agent-service
         - forgejo.viktorbarzin.me/viktor/claude-agent-service
       logins:
-        - registry: registry.viktorbarzin.me
-          username: viktorbarzin
-          password:
-            from_secret: registry-password
         - registry: forgejo.viktorbarzin.me
           username:
             from_secret: forgejo_user
