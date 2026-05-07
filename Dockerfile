@@ -5,6 +5,7 @@ ARG TERRAGRUNT_VERSION=0.99.4
 ARG SOPS_VERSION=3.9.4
 ARG KUBECTL_VERSION=1.34.0
 ARG BD_VERSION=1.0.2
+ARG VAULT_VERSION=1.20.4
 
 # System packages: infra tools + Python + Node.js (for Claude CLI).
 # gcompat/libc6-compat provide the glibc shim the bd binary links against.
@@ -36,8 +37,14 @@ RUN curl -fsSL "https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/linux/amd64/ku
     -o /usr/local/bin/kubectl \
     && chmod +x /usr/local/bin/kubectl
 
-# Vault CLI
-COPY vault /usr/local/bin/vault
+# Vault CLI — download from HashiCorp releases. The binary used to be
+# committed to the repo (495MB) but that doesn't survive the Forgejo
+# extraction (.gitignore excludes it). Pulling at build time is cleaner.
+RUN curl -fsSL "https://releases.hashicorp.com/vault/${VAULT_VERSION}/vault_${VAULT_VERSION}_linux_amd64.zip" \
+    -o /tmp/vault.zip \
+    && unzip /tmp/vault.zip -d /usr/local/bin/ \
+    && rm /tmp/vault.zip \
+    && chmod +x /usr/local/bin/vault
 
 # Claude Code CLI
 RUN npm install -g @anthropic-ai/claude-code
