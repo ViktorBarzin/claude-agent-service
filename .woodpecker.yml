@@ -1,6 +1,5 @@
 when:
   event: push
-  path: "claude-agent-service/**"
 
 clone:
   git:
@@ -13,14 +12,8 @@ steps:
   - name: build-and-push
     image: woodpeckerci/plugin-docker-buildx
     settings:
-      username: "viktorbarzin"
-      password:
-        from_secret: dockerhub-pat
       # Dual-push during the Forgejo registry consolidation bake. After
       # ≥14 days clean, registry.viktorbarzin.me drops out (Phase 4).
-      # Once this directory is extracted to the Forgejo viktor/claude-agent-service
-      # repo, drop the `path:` filter above and the `claude-agent-service/`
-      # prefix in dockerfile/context.
       repo:
         - registry.viktorbarzin.me/claude-agent-service
         - forgejo.viktorbarzin.me/viktor/claude-agent-service
@@ -34,8 +27,8 @@ steps:
             from_secret: forgejo_user
           password:
             from_secret: forgejo_push_token
-      dockerfile: claude-agent-service/Dockerfile
-      context: claude-agent-service
+      dockerfile: Dockerfile
+      context: .
       auto_tag: true
       platforms:
         - linux/amd64
