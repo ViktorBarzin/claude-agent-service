@@ -82,6 +82,7 @@ RUN mkdir -p /home/agent/.config/sops/age \
 # K8s manifest copies these files into the runtime volumes on each pod start.
 COPY beads/metadata.json /usr/share/agent-seed/beads-metadata.json
 COPY agents/beads-task-runner.md /usr/share/agent-seed/beads-task-runner.md
+COPY agents/recruiter-triage.md /usr/share/agent-seed/recruiter-triage.md
 
 USER agent
 WORKDIR /workspace/infra
