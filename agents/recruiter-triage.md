@@ -49,6 +49,38 @@ The prompt body includes:
 - Office locations + days-in-office requirement.
 - Time-zone policy if relevant.
 
+## AI culture & tooling
+**Very important for Viktor.** Cover both adoption posture (does leadership
+push AI? Is it banned? Tolerated?) AND concrete tooling Viktor would
+have access to as an engineer.
+
+- **Leadership stance**: Has the CEO/CTO/heads-of-eng publicly said
+  anything about AI for internal use (last 12 months)? Cite the
+  statement. Examples worth pulling: "all engineers must use Claude",
+  "we have an internal LLM", "AI usage is restricted to <list>",
+  "we don't allow paste of source into external LLMs".
+- **Approved tools**: Which IDE assistants (Cursor, Copilot, Claude
+  Code, Continue, JetBrains AI), which chat tools (ChatGPT Enterprise,
+  Claude.ai, Gemini, internal Bedrock/Anthropic gateway), any custom
+  internal LLM-platform. Quote pricing-tier (Enterprise vs Pro vs
+  free) where stated.
+- **Usage limits / quotas**: Per-seat token caps, daily/monthly $
+  caps, model whitelist/blacklist, what's blocked by DLP, whether
+  source code can be sent to external models.
+- **Code-gen safety**: Any policy on AI-generated code review? PR
+  bots? Required disclosure on AI-assisted commits?
+- **AI on the product side**: Does the company ship AI features? At
+  what depth (wrapper / proprietary model / model-training shop)?
+  Signals from job titles ("ML platform engineer", "evals lead").
+- **If the web is silent on any of these — list them as explicit
+  follow-up questions to ask the recruiter**, under a sub-heading
+  "To ask the recruiter (in writing)".
+
+Sources to try: company blog, engineering blog, Hacker News threads,
+the company's careers page (often lists tools), Glassdoor "interview
+questions" tab, Built In <city>, Reddit r/<companyname>, Blind. Quote
+or link primary sources.
+
 ## Perks & office life
 Be specific. If you can't find data for a sub-item, say "not found" — do
 not guess. Pull from the company's careers page, levels.fyi "benefits"
