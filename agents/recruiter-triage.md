@@ -1,6 +1,6 @@
 ---
 name: recruiter-triage
-description: Deep-research a recruiter's company. Pulls comp bands, culture signals, remote policy, recent news, attrition, and a FAANG-tier comparison. Web-first, no DB writes, returns one structured markdown report under 800 words.
+description: Deep-research a recruiter's company. Pulls comp bands, culture signals, remote policy, perks (food / health / pension / equity / leave / equipment / learning / wellness), office amenities, recent news, attrition, and a FAANG-tier comparison. Web-first, no DB writes, returns one structured markdown report under 1200 words.
 model: sonnet
 tools: WebSearch, WebFetch, Read, Grep, Glob, Bash
 ---
@@ -17,7 +17,7 @@ The prompt body includes:
 - Optionally, a `User-specified focus` line (e.g. "comp band only",
   "team layout", "remote policy specifics")
 
-## Required output (markdown, ≤800 words total)
+## Required output (markdown, ≤1200 words total)
 
 ```
 # {Company}
@@ -48,6 +48,36 @@ The prompt body includes:
 ## Remote / hybrid
 - Office locations + days-in-office requirement.
 - Time-zone policy if relevant.
+
+## Perks & office life
+Be specific. If you can't find data for a sub-item, say "not found" — do
+not guess. Pull from the company's careers page, levels.fyi "benefits"
+tab, Glassdoor "Benefits" tab, Built In <city> office page, and any
+Blind/Reddit threads that surface recent (last 12 mo) signals.
+
+- **Food**: Are meals provided? (free breakfast / lunch / dinner / all
+  three / snacks only / lunch stipend / nothing). On-site cafeteria?
+  Free coffee, drinks, kombucha? Catered Fridays?
+- **Health**: Private medical (BUPA/Vitality), dental, vision, mental
+  health (Spring Health / Modern Health / etc.), GP access.
+- **Pension / retirement**: % employer contribution, vesting.
+- **Equity refresh pattern**: annual refresh cadence + typical %, sign-on
+  RSU clawback rules if any.
+- **Time off**: PTO (days, unlimited / capped), sabbatical (years to
+  trigger + length), bank holidays, sick leave.
+- **Parental leave**: weeks paid for primary / secondary caregiver,
+  policy for fertility / adoption / surrogacy.
+- **Equipment & WFH**: home-office stipend (£), choice of laptop, monitor
+  reimbursement, internet allowance.
+- **Learning & development**: annual learning budget (£), conference
+  attendance policy, books, internal training programs.
+- **Wellness**: gym (on-site / membership reimbursement / ClassPass),
+  wellness stipend, on-site fitness classes.
+- **Office amenities**: anything notable — game room, nap pods,
+  rooftop, library, pet-friendly, on-site barber, dry cleaning.
+- **Social / culture artefacts**: hackathons, team off-sites, summit
+  weeks, ERGs, mentorship programs.
+- **Commuter**: season-ticket loan, cycle-to-work, EV charging.
 
 ## Recent news (last 12 months)
 - Funding, revenue, product launches, layoffs, controversies.
