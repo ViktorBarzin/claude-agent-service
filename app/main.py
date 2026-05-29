@@ -1,17 +1,36 @@
 import asyncio
 import hmac
+import json
 import os
+import time
 import uuid
 from datetime import datetime, timezone
 from subprocess import PIPE
+from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException, Header
-from pydantic import BaseModel
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 
 app = FastAPI(title="Claude Agent Service")
 
 API_TOKEN = os.environ.get("API_BEARER_TOKEN", "")
 WORKSPACE_DIR = os.environ.get("WORKSPACE_DIR", "/workspace/infra")
+
+# OpenAI compat: model -> agent mapping. v1 keeps it dead simple — all models
+# route to the most general agent we have. `recruiter-triage` has the broadest
+# tool surface (WebSearch, WebFetch, Read, Grep, Glob, Bash); the alternative
+# (`beads-task-runner`) is locked to read-only `bd` verbs which would fail
+# arbitrary OpenAI-API callers. Revisit when a true general-purpose agent
+# lands in `agents/`.
+MODEL_TO_AGENT: dict[str, str] = {
+    "claude-haiku-4-5": "recruiter-triage",
+    "claude-sonnet-4-6": "recruiter-triage",
+    "claude-opus-4-7": "recruiter-triage",
+}
+AGENT_DEFAULT = "recruiter-triage"
+OPENAI_COMPAT_BUDGET_USD = 2.0
+OPENAI_COMPAT_TIMEOUT_SECONDS = 900
 
 jobs: dict[str, dict] = {}
 execution_lock = asyncio.Lock()
@@ -23,6 +42,21 @@ class ExecuteRequest(BaseModel):
     max_budget_usd: float = 5.0
     timeout_seconds: int = 2700
     metadata: dict | None = None
+
+
+class ChatMessage(BaseModel):
+    role: Literal["system", "user", "assistant"]
+    content: str
+
+
+class ChatCompletionsRequest(BaseModel):
+    model: str
+    messages: list[ChatMessage] = Field(..., min_length=1)
+    max_tokens: int | None = None
+    temperature: float | None = None
+    stream: bool = False
+    # Tolerate (and ignore) other OpenAI fields rather than 422-ing on them.
+    model_config = {"extra": "allow"}
 
 
 def verify_token(authorization: str | None):
@@ -47,38 +81,60 @@ async def run_git_sync():
     await proc.wait()
 
 
+async def _invoke_claude_subprocess(
+    prompt: str,
+    agent: str,
+    max_budget_usd: float,
+) -> dict[str, Any]:
+    """Run the claude CLI once and return a result dict.
+
+    The caller is responsible for holding `execution_lock` for the duration —
+    this helper does not touch the lock or the `jobs` dict, so it can be
+    shared by both the background `/execute` path and the synchronous
+    `/v1/chat/completions` path.
+    """
+    await run_git_sync()
+
+    cmd = [
+        "claude", "-p",
+        "--agent", agent,
+        "--dangerously-skip-permissions",
+        "--max-budget-usd", str(max_budget_usd),
+        "--output-format", "json",
+        prompt,
+    ]
+
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        cwd=WORKSPACE_DIR,
+        stdout=PIPE,
+        stderr=PIPE,
+    )
+
+    output_lines: list[str] = []
+    async for line in proc.stdout:
+        output_lines.append(line.decode())
+
+    stderr = await proc.stderr.read()
+    await proc.wait()
+
+    return {
+        "exit_code": proc.returncode,
+        "output": output_lines,
+        "stderr": stderr.decode(),
+    }
+
+
 async def run_agent(job_id: str, request: ExecuteRequest):
     try:
-        await run_git_sync()
-
-        cmd = [
-            "claude", "-p",
-            "--agent", request.agent,
-            "--dangerously-skip-permissions",
-            "--max-budget-usd", str(request.max_budget_usd),
-            "--output-format", "json",
-            request.prompt,
-        ]
-
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            cwd=WORKSPACE_DIR,
-            stdout=PIPE,
-            stderr=PIPE,
+        result = await _invoke_claude_subprocess(
+            request.prompt, request.agent, request.max_budget_usd,
         )
-
-        output_lines = []
-        async for line in proc.stdout:
-            output_lines.append(line.decode())
-
-        stderr = await proc.stderr.read()
-        await proc.wait()
-
         jobs[job_id].update({
-            "status": "completed" if proc.returncode == 0 else "failed",
-            "exit_code": proc.returncode,
-            "output": output_lines,
-            "stderr": stderr.decode(),
+            "status": "completed" if result["exit_code"] == 0 else "failed",
+            "exit_code": result["exit_code"],
+            "output": result["output"],
+            "stderr": result["stderr"],
             "finished_at": datetime.now(timezone.utc).isoformat(),
         })
     except asyncio.TimeoutError:
@@ -87,6 +143,59 @@ async def run_agent(job_id: str, request: ExecuteRequest):
         jobs[job_id].update({"status": "error", "error": str(exc)})
     finally:
         execution_lock.release()
+
+
+def _extract_assistant_text(output_lines: list[str]) -> str:
+    """Pull the final assistant text out of `claude -p --output-format json`.
+
+    The CLI emits a single JSON object on stdout (possibly across multiple
+    lines if it pretty-prints) with a `result` field holding the final
+    assistant message. If parsing fails for any reason, fall back to the
+    raw concatenation so callers always get *something* useful.
+    """
+    raw = "".join(output_lines).strip()
+    if not raw:
+        return ""
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return raw
+    if isinstance(parsed, dict):
+        for key in ("result", "content", "text"):
+            value = parsed.get(key)
+            if isinstance(value, str) and value:
+                return value
+    return raw
+
+
+def _one_line(text: str, limit: int = 200) -> str:
+    """Collapse multi-line text to a single line, truncated for response bodies."""
+    flat = " ".join(text.split())
+    return flat[:limit]
+
+
+def _synthesise_prompt(messages: list[ChatMessage]) -> str:
+    """Flatten OpenAI chat messages into a single prompt body.
+
+    System messages are surfaced as preamble; user messages become the
+    actual request. Multiple user turns are concatenated in order so a
+    short multi-turn back-and-forth still works (this is a stateless
+    completion — we don't replay prior assistant turns).
+    """
+    system_parts = [m.content for m in messages if m.role == "system"]
+    user_parts = [m.content for m in messages if m.role == "user"]
+    # Assistant messages from prior turns are intentionally NOT injected —
+    # claude `-p` is stateless and replaying them as user text would
+    # confuse the agent.
+    sections: list[str] = []
+    if system_parts:
+        sections.append("System instructions:\n" + "\n\n".join(system_parts))
+    if user_parts:
+        sections.append("Request:\n" + "\n\n".join(user_parts))
+    if not sections:
+        # Defensive — pydantic min_length=1 should already prevent this.
+        return ""
+    return "\n\n---\n\n".join(sections)
 
 
 @app.get("/health")
@@ -134,3 +243,70 @@ async def get_job(
     if job_id not in jobs:
         raise HTTPException(status_code=404, detail="Job not found")
     return jobs[job_id]
+
+
+@app.post("/v1/chat/completions")
+async def chat_completions(
+    request: ChatCompletionsRequest,
+    authorization: str | None = Header(default=None),
+):
+    verify_token(authorization)
+
+    if request.stream:
+        raise HTTPException(status_code=400, detail="streaming not supported")
+
+    agent = MODEL_TO_AGENT.get(request.model, AGENT_DEFAULT)
+    prompt = _synthesise_prompt(request.messages)
+
+    if execution_lock.locked():
+        return JSONResponse(
+            status_code=503,
+            content={"error": "execution failed", "detail": "agent is busy"},
+        )
+
+    await execution_lock.acquire()
+    try:
+        try:
+            result = await asyncio.wait_for(
+                _invoke_claude_subprocess(prompt, agent, OPENAI_COMPAT_BUDGET_USD),
+                timeout=OPENAI_COMPAT_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            return JSONResponse(
+                status_code=503,
+                content={"error": "execution failed", "detail": "agent timed out"},
+            )
+        except Exception as exc:
+            return JSONResponse(
+                status_code=503,
+                content={"error": "execution failed", "detail": _one_line(str(exc))},
+            )
+    finally:
+        execution_lock.release()
+
+    if result["exit_code"] != 0:
+        detail = _one_line(result.get("stderr") or "") or f"exit {result['exit_code']}"
+        return JSONResponse(
+            status_code=503,
+            content={"error": "execution failed", "detail": detail},
+        )
+
+    content = _extract_assistant_text(result["output"])
+    completion_id = "chatcmpl-" + uuid.uuid4().hex[:24]
+
+    return {
+        "id": completion_id,
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": request.model,
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": content},
+            "finish_reason": "stop",
+        }],
+        "usage": {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+        },
+    }
