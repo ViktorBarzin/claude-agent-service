@@ -32,6 +32,12 @@ SUPPORTED_MODELS: frozenset[str] = frozenset({
     "haiku",
     "sonnet",
     "opus",
+    # Legacy date-suffixed forms — kept for callers that pinned before the
+    # 2026-06-01 bare-aliases switch (fire-planner < c1c1e22). Drop these
+    # once all consumers have been re-imaged.
+    "claude-haiku-4-5",
+    "claude-sonnet-4-6",
+    "claude-opus-4-7",
 })
 DEFAULT_MODEL = "sonnet"
 OPENAI_COMPAT_AGENT = "recruiter-triage"
