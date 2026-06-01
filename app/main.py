@@ -17,18 +17,19 @@ app = FastAPI(title="Claude Agent Service")
 API_TOKEN = os.environ.get("API_BEARER_TOKEN", "")
 WORKSPACE_DIR = os.environ.get("WORKSPACE_DIR", "/workspace/infra")
 
-# OpenAI compat: model -> agent mapping. v1 keeps it dead simple — all models
-# route to the most general agent we have. `recruiter-triage` has the broadest
-# tool surface (WebSearch, WebFetch, Read, Grep, Glob, Bash); the alternative
-# (`beads-task-runner`) is locked to read-only `bd` verbs which would fail
-# arbitrary OpenAI-API callers. Revisit when a true general-purpose agent
-# lands in `agents/`.
-MODEL_TO_AGENT: dict[str, str] = {
-    "claude-haiku-4-5": "recruiter-triage",
-    "claude-sonnet-4-6": "recruiter-triage",
-    "claude-opus-4-7": "recruiter-triage",
-}
-AGENT_DEFAULT = "recruiter-triage"
+# OpenAI compat: model selection is per-request so callers can pick
+# Haiku/Sonnet/Opus to control cost. The agent is fixed — `recruiter-triage`
+# has the broadest tool surface (WebSearch, WebFetch, Read, Grep, Glob, Bash);
+# the alternative (`beads-task-runner`) is locked to read-only `bd` verbs which
+# would fail arbitrary OpenAI-API callers. The model on the agent's frontmatter
+# is overridden by the `--model` CLI flag we pass per-request.
+SUPPORTED_MODELS: frozenset[str] = frozenset({
+    "claude-haiku-4-5",
+    "claude-sonnet-4-6",
+    "claude-opus-4-7",
+})
+DEFAULT_MODEL = "claude-sonnet-4-6"
+OPENAI_COMPAT_AGENT = "recruiter-triage"
 OPENAI_COMPAT_BUDGET_USD = 2.0
 OPENAI_COMPAT_TIMEOUT_SECONDS = 900
 
@@ -50,7 +51,10 @@ class ChatMessage(BaseModel):
 
 
 class ChatCompletionsRequest(BaseModel):
-    model: str
+    # `model` is optional: callers that omit it get DEFAULT_MODEL. We still
+    # validate the explicit value against SUPPORTED_MODELS at the route level
+    # so we can return a structured 400 listing the allowed IDs.
+    model: str | None = None
     messages: list[ChatMessage] = Field(..., min_length=1)
     max_tokens: int | None = None
     temperature: float | None = None
@@ -85,6 +89,7 @@ async def _invoke_claude_subprocess(
     prompt: str,
     agent: str,
     max_budget_usd: float,
+    model: str | None = None,
 ) -> dict[str, Any]:
     """Run the claude CLI once and return a result dict.
 
@@ -92,6 +97,10 @@ async def _invoke_claude_subprocess(
     this helper does not touch the lock or the `jobs` dict, so it can be
     shared by both the background `/execute` path and the synchronous
     `/v1/chat/completions` path.
+
+    `model`, when provided, becomes `--model <id>` on the claude CLI. This
+    overrides whatever `model:` is set in the agent's frontmatter so the
+    OpenAI-compat path can pick Haiku/Sonnet/Opus per-request.
     """
     await run_git_sync()
 
@@ -101,8 +110,10 @@ async def _invoke_claude_subprocess(
         "--dangerously-skip-permissions",
         "--max-budget-usd", str(max_budget_usd),
         "--output-format", "json",
-        prompt,
     ]
+    if model is not None:
+        cmd.extend(["--model", model])
+    cmd.append(prompt)
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,
@@ -255,7 +266,16 @@ async def chat_completions(
     if request.stream:
         raise HTTPException(status_code=400, detail="streaming not supported")
 
-    agent = MODEL_TO_AGENT.get(request.model, AGENT_DEFAULT)
+    model = request.model if request.model is not None else DEFAULT_MODEL
+    if model not in SUPPORTED_MODELS:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": "unsupported model",
+                "supported": sorted(SUPPORTED_MODELS),
+            },
+        )
+
     prompt = _synthesise_prompt(request.messages)
 
     if execution_lock.locked():
@@ -268,7 +288,9 @@ async def chat_completions(
     try:
         try:
             result = await asyncio.wait_for(
-                _invoke_claude_subprocess(prompt, agent, OPENAI_COMPAT_BUDGET_USD),
+                _invoke_claude_subprocess(
+                    prompt, OPENAI_COMPAT_AGENT, OPENAI_COMPAT_BUDGET_USD, model=model,
+                ),
                 timeout=OPENAI_COMPAT_TIMEOUT_SECONDS,
             )
         except asyncio.TimeoutError:
@@ -298,7 +320,7 @@ async def chat_completions(
         "id": completion_id,
         "object": "chat.completion",
         "created": int(time.time()),
-        "model": request.model,
+        "model": model,
         "choices": [{
             "index": 0,
             "message": {"role": "assistant", "content": content},

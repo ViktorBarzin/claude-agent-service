@@ -262,3 +262,129 @@ async def test_chat_completions_returns_503_when_agent_busy(auth_header):
     assert response.status_code == 503
     body = response.json()
     assert body.get("error") == "execution failed"
+
+
+async def _capture_subprocess_args(
+    auth_header: dict,
+    payload: dict,
+) -> tuple[int, dict, tuple]:
+    """POST `payload` to /v1/chat/completions and return (status, body, subprocess_args).
+
+    The subprocess is mocked to return a trivial success result; the
+    point is to inspect the argv passed to `asyncio.create_subprocess_exec`.
+    """
+    captured: dict = {}
+
+    async def fake_subprocess(*args, **kwargs):
+        captured["args"] = args
+        return _mock_subprocess_returning(
+            json.dumps({"type": "result", "result": "ok", "is_error": False}).encode(),
+            returncode=0,
+        )
+
+    with patch("app.main.asyncio.create_subprocess_exec", side_effect=fake_subprocess), \
+            patch("app.main.run_git_sync", new_callable=AsyncMock):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                "/v1/chat/completions",
+                json=payload,
+                headers=auth_header,
+            )
+    return response.status_code, response.json(), captured.get("args", ())
+
+
+@pytest.mark.asyncio
+async def test_chat_completions_routes_haiku_to_claude_cli(auth_header):
+    """`model: claude-haiku-4-5` → subprocess invoked with `--model claude-haiku-4-5`."""
+    status, _, args = await _capture_subprocess_args(
+        auth_header,
+        {
+            "model": "claude-haiku-4-5",
+            "messages": [{"role": "user", "content": "hi"}],
+        },
+    )
+    assert status == 200
+    assert "--model" in args
+    model_idx = args.index("--model")
+    assert args[model_idx + 1] == "claude-haiku-4-5"
+
+
+@pytest.mark.asyncio
+async def test_chat_completions_routes_sonnet_to_claude_cli(auth_header):
+    """`model: claude-sonnet-4-6` → subprocess invoked with `--model claude-sonnet-4-6`."""
+    status, _, args = await _capture_subprocess_args(
+        auth_header,
+        {
+            "model": "claude-sonnet-4-6",
+            "messages": [{"role": "user", "content": "hi"}],
+        },
+    )
+    assert status == 200
+    assert "--model" in args
+    model_idx = args.index("--model")
+    assert args[model_idx + 1] == "claude-sonnet-4-6"
+
+
+@pytest.mark.asyncio
+async def test_chat_completions_routes_opus_to_claude_cli(auth_header):
+    """`model: claude-opus-4-7` → subprocess invoked with `--model claude-opus-4-7`."""
+    status, _, args = await _capture_subprocess_args(
+        auth_header,
+        {
+            "model": "claude-opus-4-7",
+            "messages": [{"role": "user", "content": "hi"}],
+        },
+    )
+    assert status == 200
+    assert "--model" in args
+    model_idx = args.index("--model")
+    assert args[model_idx + 1] == "claude-opus-4-7"
+
+
+@pytest.mark.asyncio
+async def test_chat_completions_uses_default_model_when_field_missing(auth_header):
+    """Missing `model` → subprocess invoked with `--model claude-sonnet-4-6` (default)."""
+    status, _, args = await _capture_subprocess_args(
+        auth_header,
+        {"messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert status == 200
+    assert "--model" in args
+    model_idx = args.index("--model")
+    assert args[model_idx + 1] == "claude-sonnet-4-6"
+
+
+@pytest.mark.asyncio
+async def test_chat_completions_rejects_unknown_model(auth_header):
+    """Unknown models 400 with `unsupported model` and the supported list."""
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "gpt-4o",
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+            headers=auth_header,
+        )
+    assert response.status_code == 400
+    body = response.json()
+    assert body.get("error") == "unsupported model"
+    assert "supported" in body
+    supported = body["supported"]
+    assert isinstance(supported, list)
+    assert "claude-haiku-4-5" in supported
+    assert "claude-sonnet-4-6" in supported
+    assert "claude-opus-4-7" in supported
+
+
+@pytest.mark.asyncio
+async def test_chat_completions_response_model_echoes_default_when_missing(auth_header):
+    """When `model` is omitted, the response `model` field reports the default used."""
+    status, body, _ = await _capture_subprocess_args(
+        auth_header,
+        {"messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert status == 200
+    assert body["model"] == "claude-sonnet-4-6"
