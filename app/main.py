@@ -23,12 +23,17 @@ WORKSPACE_DIR = os.environ.get("WORKSPACE_DIR", "/workspace/infra")
 # the alternative (`beads-task-runner`) is locked to read-only `bd` verbs which
 # would fail arbitrary OpenAI-API callers. The model on the agent's frontmatter
 # is overridden by the `--model` CLI flag we pass per-request.
+# Bare aliases auto-roll forward to the latest published version of each
+# family. The Claude CLI resolves `haiku` → `claude-haiku-4-5-20251001`
+# (and bumps it when Anthropic ships a newer Haiku) — letting us avoid
+# version bumps on every release. Add a specific date-suffixed string here
+# only if a caller needs to pin against an upcoming roll-forward.
 SUPPORTED_MODELS: frozenset[str] = frozenset({
-    "claude-haiku-4-5",
-    "claude-sonnet-4-6",
-    "claude-opus-4-7",
+    "haiku",
+    "sonnet",
+    "opus",
 })
-DEFAULT_MODEL = "claude-sonnet-4-6"
+DEFAULT_MODEL = "sonnet"
 OPENAI_COMPAT_AGENT = "recruiter-triage"
 OPENAI_COMPAT_BUDGET_USD = 2.0
 OPENAI_COMPAT_TIMEOUT_SECONDS = 900

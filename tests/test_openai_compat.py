@@ -67,7 +67,7 @@ async def test_chat_completions_happy_path(auth_header):
             response = await client.post(
                 "/v1/chat/completions",
                 json={
-                    "model": "claude-haiku-4-5",
+                    "model": "haiku",
                     "messages": [
                         {"role": "system", "content": "You are concise."},
                         {"role": "user", "content": "Capital of France?"},
@@ -81,7 +81,7 @@ async def test_chat_completions_happy_path(auth_header):
 
     assert body["object"] == "chat.completion"
     assert body["id"].startswith("chatcmpl-")
-    assert body["model"] == "claude-haiku-4-5"
+    assert body["model"] == "haiku"
     assert "created" in body
     assert isinstance(body["created"], int)
 
@@ -105,7 +105,7 @@ async def test_chat_completions_rejects_streaming(auth_header):
         response = await client.post(
             "/v1/chat/completions",
             json={
-                "model": "claude-haiku-4-5",
+                "model": "haiku",
                 "messages": [{"role": "user", "content": "hi"}],
                 "stream": True,
             },
@@ -124,7 +124,7 @@ async def test_chat_completions_requires_auth():
         response = await client.post(
             "/v1/chat/completions",
             json={
-                "model": "claude-haiku-4-5",
+                "model": "haiku",
                 "messages": [{"role": "user", "content": "hi"}],
             },
         )
@@ -139,7 +139,7 @@ async def test_chat_completions_wrong_bearer_token():
         response = await client.post(
             "/v1/chat/completions",
             json={
-                "model": "claude-haiku-4-5",
+                "model": "haiku",
                 "messages": [{"role": "user", "content": "hi"}],
             },
             headers={"Authorization": "Bearer wrong"},
@@ -160,7 +160,7 @@ async def test_chat_completions_returns_503_on_job_failure(auth_header):
             response = await client.post(
                 "/v1/chat/completions",
                 json={
-                    "model": "claude-haiku-4-5",
+                    "model": "haiku",
                     "messages": [{"role": "user", "content": "trigger fail"}],
                 },
                 headers=auth_header,
@@ -179,7 +179,7 @@ async def test_chat_completions_rejects_empty_messages(auth_header):
         response = await client.post(
             "/v1/chat/completions",
             json={
-                "model": "claude-haiku-4-5",
+                "model": "haiku",
                 "messages": [],
             },
             headers=auth_header,
@@ -199,7 +199,7 @@ async def test_chat_completions_falls_back_when_no_json_result(auth_header):
             response = await client.post(
                 "/v1/chat/completions",
                 json={
-                    "model": "claude-haiku-4-5",
+                    "model": "haiku",
                     "messages": [{"role": "user", "content": "hi"}],
                 },
                 headers=auth_header,
@@ -228,7 +228,7 @@ async def test_chat_completions_concats_system_and_user_messages(auth_header):
             response = await client.post(
                 "/v1/chat/completions",
                 json={
-                    "model": "claude-haiku-4-5",
+                    "model": "haiku",
                     "messages": [
                         {"role": "system", "content": "SYSTEM-MARKER"},
                         {"role": "user", "content": "USER-MARKER"},
@@ -252,7 +252,7 @@ async def test_chat_completions_returns_503_when_agent_busy(auth_header):
             response = await client.post(
                 "/v1/chat/completions",
                 json={
-                    "model": "claude-haiku-4-5",
+                    "model": "haiku",
                     "messages": [{"role": "user", "content": "hi"}],
                 },
                 headers=auth_header,
@@ -296,55 +296,55 @@ async def _capture_subprocess_args(
 
 @pytest.mark.asyncio
 async def test_chat_completions_routes_haiku_to_claude_cli(auth_header):
-    """`model: claude-haiku-4-5` → subprocess invoked with `--model claude-haiku-4-5`."""
+    """`model: haiku` → subprocess invoked with `--model haiku`."""
     status, _, args = await _capture_subprocess_args(
         auth_header,
         {
-            "model": "claude-haiku-4-5",
+            "model": "haiku",
             "messages": [{"role": "user", "content": "hi"}],
         },
     )
     assert status == 200
     assert "--model" in args
     model_idx = args.index("--model")
-    assert args[model_idx + 1] == "claude-haiku-4-5"
+    assert args[model_idx + 1] == "haiku"
 
 
 @pytest.mark.asyncio
 async def test_chat_completions_routes_sonnet_to_claude_cli(auth_header):
-    """`model: claude-sonnet-4-6` → subprocess invoked with `--model claude-sonnet-4-6`."""
+    """`model: sonnet` → subprocess invoked with `--model sonnet`."""
     status, _, args = await _capture_subprocess_args(
         auth_header,
         {
-            "model": "claude-sonnet-4-6",
+            "model": "sonnet",
             "messages": [{"role": "user", "content": "hi"}],
         },
     )
     assert status == 200
     assert "--model" in args
     model_idx = args.index("--model")
-    assert args[model_idx + 1] == "claude-sonnet-4-6"
+    assert args[model_idx + 1] == "sonnet"
 
 
 @pytest.mark.asyncio
 async def test_chat_completions_routes_opus_to_claude_cli(auth_header):
-    """`model: claude-opus-4-7` → subprocess invoked with `--model claude-opus-4-7`."""
+    """`model: opus` → subprocess invoked with `--model opus`."""
     status, _, args = await _capture_subprocess_args(
         auth_header,
         {
-            "model": "claude-opus-4-7",
+            "model": "opus",
             "messages": [{"role": "user", "content": "hi"}],
         },
     )
     assert status == 200
     assert "--model" in args
     model_idx = args.index("--model")
-    assert args[model_idx + 1] == "claude-opus-4-7"
+    assert args[model_idx + 1] == "opus"
 
 
 @pytest.mark.asyncio
 async def test_chat_completions_uses_default_model_when_field_missing(auth_header):
-    """Missing `model` → subprocess invoked with `--model claude-sonnet-4-6` (default)."""
+    """Missing `model` → subprocess invoked with `--model sonnet` (default)."""
     status, _, args = await _capture_subprocess_args(
         auth_header,
         {"messages": [{"role": "user", "content": "hi"}]},
@@ -352,7 +352,7 @@ async def test_chat_completions_uses_default_model_when_field_missing(auth_heade
     assert status == 200
     assert "--model" in args
     model_idx = args.index("--model")
-    assert args[model_idx + 1] == "claude-sonnet-4-6"
+    assert args[model_idx + 1] == "sonnet"
 
 
 @pytest.mark.asyncio
@@ -374,9 +374,9 @@ async def test_chat_completions_rejects_unknown_model(auth_header):
     assert "supported" in body
     supported = body["supported"]
     assert isinstance(supported, list)
-    assert "claude-haiku-4-5" in supported
-    assert "claude-sonnet-4-6" in supported
-    assert "claude-opus-4-7" in supported
+    assert "haiku" in supported
+    assert "sonnet" in supported
+    assert "opus" in supported
 
 
 @pytest.mark.asyncio
@@ -387,4 +387,4 @@ async def test_chat_completions_response_model_echoes_default_when_missing(auth_
         {"messages": [{"role": "user", "content": "hi"}]},
     )
     assert status == 200
-    assert body["model"] == "claude-sonnet-4-6"
+    assert body["model"] == "sonnet"
