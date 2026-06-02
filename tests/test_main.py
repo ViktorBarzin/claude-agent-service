@@ -1,4 +1,3 @@
-import asyncio
 from unittest.mock import AsyncMock, patch, MagicMock
 
 import pytest
@@ -65,7 +64,7 @@ async def test_execute_rejects_missing_prompt(auth_header):
 
 
 @pytest.mark.asyncio
-async def test_execute_starts_job(auth_header):
+async def test_execute_starts_job(auth_header, drain):
     mock_process = AsyncMock()
     mock_process.stdout = AsyncMock()
     mock_process.stdout.__aiter__ = MagicMock(return_value=iter([]))
@@ -75,7 +74,8 @@ async def test_execute_starts_job(auth_header):
     mock_process.returncode = 0
 
     with patch("app.main.asyncio.create_subprocess_exec", return_value=mock_process):
-        with patch("app.main.run_git_sync", new_callable=AsyncMock):
+        with patch("app.main.prepare_workspace", new=AsyncMock(return_value="/tmp/ws")), \
+                patch("app.main.cleanup_workspace", new=AsyncMock()):
             transport = ASGITransport(app=app)
             async with AsyncClient(transport=transport, base_url="http://test") as client:
                 response = await client.post(
@@ -83,10 +83,11 @@ async def test_execute_starts_job(auth_header):
                     json={"prompt": "test prompt", "agent": "test-agent"},
                     headers=auth_header,
                 )
+                await drain()
     assert response.status_code == 202
     body = response.json()
     assert "job_id" in body
-    assert body["status"] == "running"
+    assert body["status"] == "queued"
 
 
 @pytest.mark.asyncio
@@ -98,7 +99,7 @@ async def test_get_job_not_found(auth_header):
 
 
 @pytest.mark.asyncio
-async def test_execute_stores_metadata_on_job(auth_header):
+async def test_execute_stores_metadata_on_job(auth_header, drain):
     mock_process = AsyncMock()
     mock_process.stdout = AsyncMock()
     mock_process.stdout.__aiter__ = MagicMock(return_value=iter([]))
@@ -110,7 +111,8 @@ async def test_execute_stores_metadata_on_job(auth_header):
     metadata = {"task_id": "code-xyz", "source": "beadboard"}
 
     with patch("app.main.asyncio.create_subprocess_exec", return_value=mock_process):
-        with patch("app.main.run_git_sync", new_callable=AsyncMock):
+        with patch("app.main.prepare_workspace", new=AsyncMock(return_value="/tmp/ws")), \
+                patch("app.main.cleanup_workspace", new=AsyncMock()):
             transport = ASGITransport(app=app)
             async with AsyncClient(transport=transport, base_url="http://test") as client:
                 response = await client.post(
@@ -126,53 +128,9 @@ async def test_execute_stores_metadata_on_job(auth_header):
                 job_id = response.json()["job_id"]
 
                 job_response = await client.get(f"/jobs/{job_id}", headers=auth_header)
+                await drain()
     assert job_response.status_code == 200
     assert job_response.json()["metadata"] == metadata
-
-
-@pytest.mark.asyncio
-async def test_execute_respects_sequential_lock(auth_header):
-    hold_event = asyncio.Event()
-    release_event = asyncio.Event()
-
-    async def slow_subprocess(*args, **kwargs):
-        mock = AsyncMock()
-        mock.stdout = AsyncMock()
-
-        async def slow_iter():
-            hold_event.set()
-            await release_event.wait()
-            return
-            yield  # noqa: F841 - unreachable yield makes this an async generator
-
-        mock.stdout.__aiter__ = MagicMock(side_effect=slow_iter)
-        mock.stderr = AsyncMock()
-        mock.stderr.read = AsyncMock(return_value=b"")
-        mock.wait = AsyncMock(return_value=0)
-        mock.returncode = 0
-        return mock
-
-    with patch("app.main.asyncio.create_subprocess_exec", side_effect=slow_subprocess):
-        with patch("app.main.run_git_sync", new_callable=AsyncMock):
-            transport = ASGITransport(app=app)
-            async with AsyncClient(transport=transport, base_url="http://test") as client:
-                task1 = asyncio.create_task(client.post(
-                    "/execute",
-                    json={"prompt": "first", "agent": "agent1"},
-                    headers=auth_header,
-                ))
-                await hold_event.wait()
-
-                response2 = await client.post(
-                    "/execute",
-                    json={"prompt": "second", "agent": "agent2"},
-                    headers=auth_header,
-                )
-                assert response2.status_code == 409
-
-                release_event.set()
-                response1 = await task1
-                assert response1.status_code == 202
 
 
 @pytest.mark.asyncio
@@ -192,7 +150,7 @@ async def test_execute_rejects_empty_api_token_header():
 
 
 @pytest.mark.asyncio
-async def test_execute_accepts_correct_bearer_token():
+async def test_execute_accepts_correct_bearer_token(drain):
     mock_process = AsyncMock()
     mock_process.stdout = AsyncMock()
     mock_process.stdout.__aiter__ = MagicMock(return_value=iter([]))
@@ -203,7 +161,8 @@ async def test_execute_accepts_correct_bearer_token():
 
     with patch.object(app_main, "API_TOKEN", "secret"):
         with patch("app.main.asyncio.create_subprocess_exec", return_value=mock_process):
-            with patch("app.main.run_git_sync", new_callable=AsyncMock):
+            with patch("app.main.prepare_workspace", new=AsyncMock(return_value="/tmp/ws")), \
+                patch("app.main.cleanup_workspace", new=AsyncMock()):
                 transport = ASGITransport(app=app)
                 async with AsyncClient(transport=transport, base_url="http://test") as client:
                     response = await client.post(
@@ -211,4 +170,5 @@ async def test_execute_accepts_correct_bearer_token():
                         json={"prompt": "test", "agent": "test-agent"},
                         headers={"Authorization": "Bearer secret"},
                     )
+                    await drain()
     assert response.status_code == 202

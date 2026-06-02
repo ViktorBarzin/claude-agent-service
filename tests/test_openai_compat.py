@@ -5,7 +5,6 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from app import main as app_main
 from app.main import app
 
 
@@ -61,7 +60,8 @@ async def test_chat_completions_happy_path(auth_header):
     mock_proc = _mock_subprocess_returning(cli_output, returncode=0)
 
     with patch("app.main.asyncio.create_subprocess_exec", return_value=mock_proc), \
-            patch("app.main.run_git_sync", new_callable=AsyncMock):
+            patch("app.main.prepare_workspace", new=AsyncMock(return_value="/tmp/ws")), \
+            patch("app.main.cleanup_workspace", new=AsyncMock()):
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             response = await client.post(
@@ -154,7 +154,8 @@ async def test_chat_completions_returns_503_on_job_failure(auth_header):
     mock_proc.stderr.read = AsyncMock(return_value=b"boom")
 
     with patch("app.main.asyncio.create_subprocess_exec", return_value=mock_proc), \
-            patch("app.main.run_git_sync", new_callable=AsyncMock):
+            patch("app.main.prepare_workspace", new=AsyncMock(return_value="/tmp/ws")), \
+            patch("app.main.cleanup_workspace", new=AsyncMock()):
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             response = await client.post(
@@ -193,7 +194,8 @@ async def test_chat_completions_falls_back_when_no_json_result(auth_header):
     mock_proc = _mock_subprocess_returning(b"plain non-json output", returncode=0)
 
     with patch("app.main.asyncio.create_subprocess_exec", return_value=mock_proc), \
-            patch("app.main.run_git_sync", new_callable=AsyncMock):
+            patch("app.main.prepare_workspace", new=AsyncMock(return_value="/tmp/ws")), \
+            patch("app.main.cleanup_workspace", new=AsyncMock()):
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             response = await client.post(
@@ -222,7 +224,8 @@ async def test_chat_completions_concats_system_and_user_messages(auth_header):
         )
 
     with patch("app.main.asyncio.create_subprocess_exec", side_effect=fake_subprocess), \
-            patch("app.main.run_git_sync", new_callable=AsyncMock):
+            patch("app.main.prepare_workspace", new=AsyncMock(return_value="/tmp/ws")), \
+            patch("app.main.cleanup_workspace", new=AsyncMock()):
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             response = await client.post(
@@ -240,28 +243,6 @@ async def test_chat_completions_concats_system_and_user_messages(auth_header):
     prompt_arg = captured["args"][-1]
     assert "SYSTEM-MARKER" in prompt_arg
     assert "USER-MARKER" in prompt_arg
-
-
-@pytest.mark.asyncio
-async def test_chat_completions_returns_503_when_agent_busy(auth_header):
-    """If the agent is already busy, return 503."""
-    await app_main.execution_lock.acquire()
-    try:
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            response = await client.post(
-                "/v1/chat/completions",
-                json={
-                    "model": "haiku",
-                    "messages": [{"role": "user", "content": "hi"}],
-                },
-                headers=auth_header,
-            )
-    finally:
-        app_main.execution_lock.release()
-    assert response.status_code == 503
-    body = response.json()
-    assert body.get("error") == "execution failed"
 
 
 async def _capture_subprocess_args(
@@ -283,7 +264,8 @@ async def _capture_subprocess_args(
         )
 
     with patch("app.main.asyncio.create_subprocess_exec", side_effect=fake_subprocess), \
-            patch("app.main.run_git_sync", new_callable=AsyncMock):
+            patch("app.main.prepare_workspace", new=AsyncMock(return_value="/tmp/ws")), \
+            patch("app.main.cleanup_workspace", new=AsyncMock()):
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             response = await client.post(

@@ -4,6 +4,7 @@ import json
 import os
 import time
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from subprocess import PIPE
 from typing import Any, Literal
@@ -15,7 +16,26 @@ from pydantic import BaseModel, Field
 app = FastAPI(title="Claude Agent Service")
 
 API_TOKEN = os.environ.get("API_BEARER_TOKEN", "")
-WORKSPACE_DIR = os.environ.get("WORKSPACE_DIR", "/workspace/infra")
+
+# Warm base clone, populated by the init container. Each job clones from this
+# into its own dir under JOBS_DIR so concurrent calls never share a working
+# tree (no git index.lock contention, no clobbered edits).
+BASE_DIR = os.environ.get("WORKSPACE_DIR", "/workspace/infra")
+JOBS_DIR = os.environ.get("JOBS_DIR", "/workspace/jobs")
+GIT_CRYPT_KEY = os.environ.get("GIT_CRYPT_KEY", "/secrets/git-crypt/key")
+
+# Concurrency. MAX_CONCURRENCY caps simultaneous claude runs ("soft-unbounded"
+# — a high default rather than a tight limit); excess calls queue FIFO rather
+# than being rejected. MAX_QUEUE_DEPTH is a safety valve so a runaway burst
+# can't pin unbounded memory: past it, callers are turned away (429/503).
+MAX_CONCURRENCY = int(os.environ.get("MAX_CONCURRENCY", "10"))
+MAX_QUEUE_DEPTH = int(os.environ.get("MAX_QUEUE_DEPTH", "100"))
+# Completed jobs are evicted from the in-memory registry past this age so the
+# dict doesn't grow without bound.
+JOB_TTL_SECONDS = int(os.environ.get("JOB_TTL_SECONDS", "3600"))
+# Bursts share one base fetch rather than serialising a network round-trip per
+# job behind the git lock.
+FETCH_DEBOUNCE_SECONDS = int(os.environ.get("FETCH_DEBOUNCE_SECONDS", "15"))
 
 # OpenAI compat: model selection is per-request so callers can pick
 # Haiku/Sonnet/Opus to control cost. The agent is fixed — `recruiter-triage`
@@ -44,8 +64,18 @@ OPENAI_COMPAT_AGENT = "recruiter-triage"
 OPENAI_COMPAT_BUDGET_USD = 2.0
 OPENAI_COMPAT_TIMEOUT_SECONDS = 900
 
+_TERMINAL_STATUSES = frozenset({"completed", "failed", "timeout", "error"})
+
 jobs: dict[str, dict] = {}
-execution_lock = asyncio.Lock()
+
+# Concurrency primitives. The semaphore bounds simultaneous executions; the git
+# lock is held only for the fast per-job workspace setup/teardown (fetch +
+# local clone + unlock + rm), NOT for the agent run itself.
+execution_semaphore = asyncio.Semaphore(MAX_CONCURRENCY)
+git_lock = asyncio.Lock()
+inflight_active = 0
+inflight_queued = 0
+_last_fetch_epoch = 0.0
 
 
 class ExecuteRequest(BaseModel):
@@ -87,34 +117,139 @@ def verify_token(authorization: str | None):
         raise HTTPException(status_code=401, detail="Invalid token")
 
 
-async def run_git_sync():
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _reserve_queue_slot() -> bool:
+    """Admit a call into the queue, or refuse it if the queue is saturated.
+
+    Returns False when active + queued already fills MAX_QUEUE_DEPTH — the
+    caller should then turn the request away (429/503).
+    """
+    global inflight_queued
+    if inflight_active + inflight_queued >= MAX_QUEUE_DEPTH:
+        return False
+    inflight_queued += 1
+    return True
+
+
+@asynccontextmanager
+async def _execution_slot():
+    """Hold one concurrency permit for the duration of an agent run.
+
+    The caller must have reserved a queue slot via `_reserve_queue_slot()`
+    first; this moves it from queued -> active on acquire and always releases.
+    """
+    global inflight_active, inflight_queued
+    acquired = False
+    try:
+        await execution_semaphore.acquire()
+        acquired = True
+        inflight_queued -= 1
+        inflight_active += 1
+        yield
+    finally:
+        if acquired:
+            inflight_active -= 1
+            execution_semaphore.release()
+        else:
+            # Cancelled while still waiting in the queue.
+            inflight_queued -= 1
+
+
+def _evict_old_jobs() -> None:
+    now = time.time()
+    stale = [
+        jid for jid, job in jobs.items()
+        if job.get("status") in _TERMINAL_STATUSES
+        and now - job.get("finished_epoch", now) > JOB_TTL_SECONDS
+    ]
+    for jid in stale:
+        jobs.pop(jid, None)
+
+
+async def _run(*cmd: str, cwd: str | None = None, timeout: float | None = None,
+               check: bool = True, capture: bool = False) -> tuple[int, str]:
+    """Run a subprocess (no shell), optionally capturing stdout. Raises on
+    non-zero unless `check=False`. Used for the git/git-crypt/rm steps of
+    per-job workspace setup."""
     proc = await asyncio.create_subprocess_exec(
-        "git", "pull", "--rebase",
-        cwd=WORKSPACE_DIR,
-        stdout=PIPE, stderr=PIPE,
+        *cmd, cwd=cwd, stdout=PIPE, stderr=PIPE,
     )
-    await proc.wait()
+    try:
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        raise
+    rc = proc.returncode or 0
+    if check and rc != 0:
+        raise RuntimeError(f"{cmd[0]} failed ({rc}): {err.decode(errors='replace')[:200]}")
+    return rc, (out.decode(errors="replace") if capture else "")
+
+
+async def _refresh_base() -> None:
+    """Pull the base clone up to origin/master, debounced so a burst of jobs
+    shares one fetch. Failures are tolerated — jobs run against the last good
+    base rather than wedging on a transient network blip."""
+    global _last_fetch_epoch
+    now = time.time()
+    if now - _last_fetch_epoch < FETCH_DEBOUNCE_SECONDS:
+        return
+    _last_fetch_epoch = now
+    await _run("git", "-C", BASE_DIR, "fetch", "origin", "--prune",
+               timeout=120, check=False)
+    await _run("git", "-C", BASE_DIR, "reset", "--hard", "origin/master",
+               check=False)
+
+
+async def prepare_workspace(job_id: str) -> str:
+    """Create an isolated git checkout for one job and return its path.
+
+    A local clone of the warm base hardlinks the object store (near-free) and
+    carries only tracked files (no stale .terraform). The git lock is held just
+    for this fast setup, never for the agent run.
+    """
+    job_dir = os.path.join(JOBS_DIR, job_id)
+    async with git_lock:
+        await _refresh_base()
+        await _run("git", "clone", "--local", BASE_DIR, job_dir)
+        rc, base_origin = await _run(
+            "git", "-C", BASE_DIR, "remote", "get-url", "origin",
+            check=False, capture=True,
+        )
+        if rc == 0 and base_origin.strip():
+            await _run("git", "-C", job_dir, "remote", "set-url", "origin",
+                       base_origin.strip(), check=False)
+        if GIT_CRYPT_KEY and os.path.exists(GIT_CRYPT_KEY):
+            await _run("git-crypt", "unlock", GIT_CRYPT_KEY, cwd=job_dir, check=False)
+    return job_dir
+
+
+async def cleanup_workspace(path: str | None) -> None:
+    if not path:
+        return
+    await _run("rm", "-rf", path, check=False)
 
 
 async def _invoke_claude_subprocess(
     prompt: str,
     agent: str,
     max_budget_usd: float,
+    workspace: str,
     model: str | None = None,
 ) -> dict[str, Any]:
-    """Run the claude CLI once and return a result dict.
+    """Run the claude CLI once in `workspace` and return a result dict.
 
-    The caller is responsible for holding `execution_lock` for the duration —
-    this helper does not touch the lock or the `jobs` dict, so it can be
-    shared by both the background `/execute` path and the synchronous
-    `/v1/chat/completions` path.
+    Holds no lock and does not touch the `jobs` dict, so it is shared by both
+    the background `/execute` path and the synchronous `/v1/chat/completions`
+    path. The caller provides an isolated `workspace` (one per job) as cwd.
 
     `model`, when provided, becomes `--model <id>` on the claude CLI. This
     overrides whatever `model:` is set in the agent's frontmatter so the
     OpenAI-compat path can pick Haiku/Sonnet/Opus per-request.
     """
-    await run_git_sync()
-
     cmd = [
         "claude", "-p",
         "--agent", agent,
@@ -128,11 +263,13 @@ async def _invoke_claude_subprocess(
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,
-        cwd=WORKSPACE_DIR,
+        cwd=workspace,
         stdout=PIPE,
         stderr=PIPE,
     )
 
+    # stdout=PIPE / stderr=PIPE guarantee both streams are present.
+    assert proc.stdout is not None and proc.stderr is not None
     output_lines: list[str] = []
     async for line in proc.stdout:
         output_lines.append(line.decode())
@@ -147,24 +284,49 @@ async def _invoke_claude_subprocess(
     }
 
 
-async def run_agent(job_id: str, request: ExecuteRequest):
+async def _run_execute_job(job_id: str, request: ExecuteRequest):
+    """Background worker for /execute: waits for a slot (queued), then runs the
+    agent in an isolated workspace. The timeout covers execution only, never
+    the time spent waiting in the queue."""
+    workspace = None
     try:
-        result = await _invoke_claude_subprocess(
-            request.prompt, request.agent, request.max_budget_usd,
-        )
-        jobs[job_id].update({
-            "status": "completed" if result["exit_code"] == 0 else "failed",
-            "exit_code": result["exit_code"],
-            "output": result["output"],
-            "stderr": result["stderr"],
-            "finished_at": datetime.now(timezone.utc).isoformat(),
-        })
+        async with _execution_slot():
+            jobs[job_id]["status"] = "running"
+            jobs[job_id]["started_at"] = _now_iso()
+            workspace = await prepare_workspace(job_id)
+            result = await asyncio.wait_for(
+                _invoke_claude_subprocess(
+                    request.prompt, request.agent, request.max_budget_usd, workspace,
+                ),
+                timeout=request.timeout_seconds,
+            )
+            jobs[job_id].update({
+                "status": "completed" if result["exit_code"] == 0 else "failed",
+                "exit_code": result["exit_code"],
+                "output": result["output"],
+                "stderr": result["stderr"],
+                "finished_at": _now_iso(),
+                "finished_epoch": time.time(),
+            })
     except asyncio.TimeoutError:
-        jobs[job_id].update({"status": "timeout"})
+        jobs[job_id].update({
+            "status": "timeout",
+            "finished_at": _now_iso(),
+            "finished_epoch": time.time(),
+        })
     except Exception as exc:
-        jobs[job_id].update({"status": "error", "error": str(exc)})
+        jobs[job_id].update({
+            "status": "error",
+            "error": str(exc),
+            "finished_at": _now_iso(),
+            "finished_epoch": time.time(),
+        })
     finally:
-        execution_lock.release()
+        try:
+            await cleanup_workspace(workspace)
+        except Exception:
+            pass
+        _evict_old_jobs()
 
 
 def _extract_assistant_text(output_lines: list[str]) -> str:
@@ -222,7 +384,13 @@ def _synthesise_prompt(messages: list[ChatMessage]) -> str:
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "busy": execution_lock.locked()}
+    return {
+        "status": "ok",
+        "busy": inflight_active >= MAX_CONCURRENCY,
+        "active": inflight_active,
+        "queued": inflight_queued,
+        "capacity": MAX_CONCURRENCY,
+    }
 
 
 @app.post("/execute", status_code=202)
@@ -232,28 +400,21 @@ async def execute(
 ):
     verify_token(authorization)
 
-    if execution_lock.locked():
-        raise HTTPException(status_code=409, detail="Agent is busy")
-
-    await execution_lock.acquire()
+    if not _reserve_queue_slot():
+        raise HTTPException(status_code=429, detail="Queue full")
 
     job_id = uuid.uuid4().hex[:12]
     jobs[job_id] = {
-        "status": "running",
+        "status": "queued",
         "prompt": request.prompt,
         "agent": request.agent,
-        "started_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": _now_iso(),
         "metadata": request.metadata,
     }
 
-    asyncio.create_task(
-        asyncio.wait_for(
-            run_agent(job_id, request),
-            timeout=request.timeout_seconds,
-        )
-    )
+    asyncio.create_task(_run_execute_job(job_id, request))
 
-    return {"job_id": job_id, "status": "running"}
+    return {"job_id": job_id, "status": "queued"}
 
 
 @app.get("/jobs/{job_id}")
@@ -289,33 +450,39 @@ async def chat_completions(
 
     prompt = _synthesise_prompt(request.messages)
 
-    if execution_lock.locked():
+    if not _reserve_queue_slot():
         return JSONResponse(
             status_code=503,
-            content={"error": "execution failed", "detail": "agent is busy"},
+            content={"error": "execution failed", "detail": "queue full"},
         )
 
-    await execution_lock.acquire()
+    chat_id = uuid.uuid4().hex[:12]
+    workspace = None
     try:
-        try:
+        async with _execution_slot():
+            workspace = await prepare_workspace(chat_id)
             result = await asyncio.wait_for(
                 _invoke_claude_subprocess(
-                    prompt, OPENAI_COMPAT_AGENT, OPENAI_COMPAT_BUDGET_USD, model=model,
+                    prompt, OPENAI_COMPAT_AGENT, OPENAI_COMPAT_BUDGET_USD,
+                    workspace, model=model,
                 ),
                 timeout=OPENAI_COMPAT_TIMEOUT_SECONDS,
             )
-        except asyncio.TimeoutError:
-            return JSONResponse(
-                status_code=503,
-                content={"error": "execution failed", "detail": "agent timed out"},
-            )
-        except Exception as exc:
-            return JSONResponse(
-                status_code=503,
-                content={"error": "execution failed", "detail": _one_line(str(exc))},
-            )
+    except asyncio.TimeoutError:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "execution failed", "detail": "agent timed out"},
+        )
+    except Exception as exc:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "execution failed", "detail": _one_line(str(exc))},
+        )
     finally:
-        execution_lock.release()
+        try:
+            await cleanup_workspace(workspace)
+        except Exception:
+            pass
 
     if result["exit_code"] != 0:
         detail = _one_line(result.get("stderr") or "") or f"exit {result['exit_code']}"
