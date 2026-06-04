@@ -83,6 +83,8 @@ RUN mkdir -p /home/agent/.config/sops/age \
 COPY beads/metadata.json /usr/share/agent-seed/beads-metadata.json
 COPY agents/beads-task-runner.md /usr/share/agent-seed/beads-task-runner.md
 COPY agents/recruiter-triage.md /usr/share/agent-seed/recruiter-triage.md
+COPY agents/nextcloud-todos-planner.md /usr/share/agent-seed/nextcloud-todos-planner.md
+COPY agents/nextcloud-todos-exec.md /usr/share/agent-seed/nextcloud-todos-exec.md
 
 USER agent
 WORKDIR /workspace/infra
