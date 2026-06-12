@@ -5,13 +5,14 @@
   import VmControls from './VmControls.svelte';
 
   // ── session lifecycle ────────────────────────────────────────────────────
-  // sessionId is the id we POST with. The backend also reports an authoritative
-  // id in the first {kind:"session"} frame of a turn; Chat bubbles that up so
-  // the rail always shows what the agent is actually resuming.
   let sessionId = $state('');
   let sessionState = $state('connecting'); // connecting | ready | error
   let sessionError = $state('');
-  let streaming = $state(false); // a chat turn is in flight (drives the rail dot)
+  let streaming = $state(false);
+
+  // Mobile: the VM controls live in a slide-up sheet. Desktop: a side column
+  // (CSS hides the toggle and pins the sheet open as a column ≥900px).
+  let showControls = $state(false);
 
   async function newSession() {
     sessionState = 'connecting';
@@ -27,7 +28,6 @@
 
   onMount(newSession);
 
-  // Chat reports the live session id from the stream's session frame.
   function onLiveSession(id) {
     if (id) sessionId = id;
   }
@@ -43,55 +43,75 @@
     <div class="rail-title">
       <span class="glyph" aria-hidden="true">🔧</span>
       <h1>devvm <span class="accent">breakglass</span></h1>
-      <span class="rail-tag">emergency recovery</span>
     </div>
 
-    <div class="rail-status">
-      <span class="dot dot--{dotState}" aria-hidden="true"></span>
-      <span class="rail-session">
+    <div class="rail-right">
+      <span class="rail-status">
+        <span class="dot dot--{dotState}" aria-hidden="true"></span>
         {#if sessionState === 'error'}
-          <span class="session-bad">session unavailable</span>
+          <span class="session-bad">offline</span>
         {:else if sessionState === 'connecting'}
-          <span class="session-meta">opening session…</span>
+          <span class="session-meta">connecting…</span>
         {:else}
-          <span class="session-label">session</span>
           <code class="session-id" title={sessionId}>{shortId}</code>
-          {#if streaming}<span class="session-meta">· agent working</span>{/if}
         {/if}
       </span>
+
+      <!-- Mobile-only: open the VM control sheet. Hidden on desktop (column). -->
+      <button
+        class="controls-toggle"
+        onclick={() => (showControls = true)}
+        aria-label="Open direct VM controls"
+      >
+        ⚡ <span class="controls-toggle-label">VM</span>
+      </button>
+
       <button
         class="new-session"
         onclick={newSession}
         disabled={streaming || sessionState === 'connecting'}
         title={streaming ? 'wait for the current turn to finish' : 'start a fresh session'}
       >
-        New session
+        New
       </button>
     </div>
   </header>
 
   {#if sessionState === 'error'}
     <div class="rail-error" role="alert">
-      Could not reach the breakglass backend — {sessionError}. The cluster or
-      network may be down. The manual VM controls below still work independently
-      of the chat agent.
+      Can't reach the breakglass backend — {sessionError}. The cluster or network
+      may be down. The <strong>⚡ VM</strong> power controls still work without the chat.
     </div>
   {/if}
 
-  <main class="grid">
-    <section class="col col--chat" aria-label="Recovery chat">
+  <main class="stage">
+    <section class="chat-pane" aria-label="Recovery chat">
       <Chat
         {sessionId}
         sessionReady={sessionState === 'ready'}
-        onLiveSession={onLiveSession}
+        {onLiveSession}
         onStreamingChange={(v) => (streaming = v)}
       />
     </section>
 
-    <aside class="col col--controls" aria-label="Direct VM control">
+    <aside class="controls-pane" class:open={showControls} aria-label="Direct VM control">
+      <div class="sheet-grip" aria-hidden="true"></div>
+      <div class="controls-head">
+        <span class="controls-head-title">Direct VM control</span>
+        <button class="sheet-close" onclick={() => (showControls = false)} aria-label="Close VM controls">✕</button>
+      </div>
       <VmControls />
     </aside>
   </main>
+
+  <!-- backdrop behind the mobile sheet -->
+  <button
+    class="sheet-backdrop"
+    class:show={showControls}
+    onclick={() => (showControls = false)}
+    tabindex="-1"
+    aria-hidden="true"
+  ></button>
 </div>
 
 <style>
@@ -101,93 +121,73 @@
     flex-direction: column;
     max-width: 1500px;
     margin: 0 auto;
-    padding: 0 18px 18px;
   }
 
-  /* ── status rail ─────────────────────────────────────────────────────── */
+  /* ── status rail (compact, single row on mobile) ─────────────────────── */
   .rail {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 16px;
-    flex-wrap: wrap;
-    padding: 16px 4px 14px;
+    gap: 10px;
+    padding: 10px 14px;
     border-bottom: 1px solid var(--line);
+    flex: none;
   }
-
   .rail-title {
     display: flex;
     align-items: baseline;
-    gap: 12px;
+    gap: 9px;
+    min-width: 0;
   }
   .glyph {
-    font-size: 19px;
+    font-size: 17px;
     transform: translateY(2px);
     filter: saturate(0.85);
   }
   h1 {
     margin: 0;
     font-family: var(--mono);
-    font-size: 19px;
+    font-size: 16px;
     font-weight: 600;
     letter-spacing: 0.02em;
     color: var(--ink);
+    white-space: nowrap;
   }
   .accent {
     color: var(--cyan);
     text-shadow: 0 0 18px rgba(61, 209, 214, 0.35);
   }
-  .rail-tag {
-    font-family: var(--mono);
-    font-size: 10.5px;
-    text-transform: uppercase;
-    letter-spacing: 0.22em;
-    color: var(--ink-faint);
-    border: 1px solid var(--line-strong);
-    border-radius: 999px;
-    padding: 3px 9px;
-  }
 
-  .rail-status {
+  .rail-right {
     display: flex;
     align-items: center;
-    gap: 14px;
-    font-family: var(--mono);
-    font-size: 13px;
+    gap: 8px;
+    flex: none;
   }
-  .rail-session {
+  .rail-status {
     display: inline-flex;
-    align-items: baseline;
+    align-items: center;
     gap: 7px;
-    white-space: nowrap;
-  }
-  .session-label {
-    color: var(--ink-faint);
-    font-size: 11px;
-    text-transform: uppercase;
-    letter-spacing: 0.16em;
+    font-family: var(--mono);
+    font-size: 12px;
   }
   .session-id {
     color: var(--cyan);
-    font-family: var(--mono);
     letter-spacing: 0.04em;
   }
   .session-meta {
     color: var(--amber);
-    font-size: 12px;
   }
   .session-bad {
     color: var(--danger-bright);
   }
 
-  /* connection lamp */
   .dot {
     width: 9px;
     height: 9px;
     border-radius: 50%;
     flex: none;
     background: var(--ink-faint);
-    box-shadow: 0 0 0 0 transparent;
   }
   .dot--ready {
     background: var(--cyan);
@@ -203,28 +203,33 @@
     background: var(--danger);
     box-shadow: 0 0 10px 1px var(--danger-glow);
   }
-  @keyframes breathe {
-    0%, 100% { opacity: 0.55; }
-    50% { opacity: 1; }
-  }
+  @keyframes breathe { 0%, 100% { opacity: 0.55; } 50% { opacity: 1; } }
   @keyframes pulse {
     0%, 100% { transform: scale(0.82); opacity: 0.7; }
     50% { transform: scale(1.15); opacity: 1; }
   }
 
+  /* touch-friendly buttons */
+  .controls-toggle,
   .new-session {
+    min-height: 40px;
+    padding: 0 13px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--line-strong);
     background: var(--bg-2);
     color: var(--ink-dim);
-    border: 1px solid var(--line-strong);
-    border-radius: var(--radius-sm);
-    padding: 7px 13px;
-    font-size: 12px;
+    font-size: 13px;
     letter-spacing: 0.02em;
-    transition: border-color 0.15s, color 0.15s, background 0.15s;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
   }
-  .new-session:hover:not(:disabled) {
-    border-color: var(--cyan-dim);
-    color: var(--ink);
+  .controls-toggle {
+    border-color: #5a4a2a;
+    color: var(--amber);
+  }
+  .controls-toggle:active,
+  .new-session:active {
     background: var(--bg-3);
   }
   .new-session:disabled {
@@ -232,7 +237,7 @@
   }
 
   .rail-error {
-    margin: 12px 0 0;
+    margin: 10px 12px 0;
     padding: 11px 14px;
     border: 1px solid var(--danger-deep);
     border-left-width: 3px;
@@ -241,32 +246,117 @@
     border-radius: var(--radius-sm);
     font-size: 13px;
     line-height: 1.5;
+    flex: none;
   }
 
-  /* ── layout ──────────────────────────────────────────────────────────── */
-  .grid {
+  /* ── stage ───────────────────────────────────────────────────────────── */
+  .stage {
     flex: 1;
     min-height: 0;
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) 376px;
-    gap: 18px;
-    padding-top: 16px;
+    display: flex;
+    min-width: 0;
+    padding: 10px;
   }
-  .col {
+  .chat-pane {
+    flex: 1;
     min-height: 0;
     min-width: 0;
     display: flex;
-    flex-direction: column;
   }
 
-  @media (max-width: 940px) {
-    .grid {
-      grid-template-columns: 1fr;
-      grid-auto-rows: minmax(0, auto);
-      overflow: auto;
+  /* ── VM controls: a slide-up bottom sheet on mobile ──────────────────── */
+  .controls-pane {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 40;
+    max-height: 86dvh;
+    overflow-y: auto;
+    background: var(--bg-1);
+    border-top: 1px solid var(--line-strong);
+    border-radius: 16px 16px 0 0;
+    box-shadow: 0 -18px 40px rgba(0, 0, 0, 0.55);
+    padding: 8px 14px calc(14px + env(safe-area-inset-bottom));
+    transform: translateY(101%);
+    transition: transform 0.26s cubic-bezier(0.32, 0.72, 0, 1);
+  }
+  .controls-pane.open {
+    transform: translateY(0);
+  }
+  .sheet-grip {
+    width: 38px;
+    height: 4px;
+    border-radius: 99px;
+    background: var(--line-strong);
+    margin: 4px auto 10px;
+  }
+  .controls-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 10px;
+  }
+  .controls-head-title {
+    font-family: var(--mono);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.2em;
+    color: var(--amber);
+  }
+  .sheet-close {
+    width: 34px;
+    height: 34px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--line-strong);
+    background: var(--bg-2);
+    color: var(--ink-dim);
+    font-size: 14px;
+  }
+
+  .sheet-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 30;
+    border: 0;
+    padding: 0;
+    background: rgba(0, 0, 0, 0.55);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.22s;
+  }
+  .sheet-backdrop.show {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  /* ── desktop: controls become a static side column, sheet chrome gone ── */
+  @media (min-width: 900px) {
+    .rail {
+      padding: 14px 18px;
     }
-    .col--chat {
-      min-height: 60vh;
+    h1 { font-size: 19px; }
+    .stage {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 372px;
+      gap: 16px;
+      padding: 16px 18px 18px;
     }
+    .chat-pane { display: flex; }
+    .controls-toggle { display: none; }
+    .controls-pane {
+      position: static;
+      max-height: none;
+      overflow: visible;
+      transform: none;
+      box-shadow: none;
+      border: none;
+      border-radius: 0;
+      padding: 0;
+      z-index: auto;
+    }
+    .sheet-grip,
+    .controls-head,
+    .sheet-backdrop { display: none; }
   }
 </style>

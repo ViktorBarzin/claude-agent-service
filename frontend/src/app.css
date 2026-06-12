@@ -55,6 +55,10 @@ html,
 body {
   margin: 0;
   height: 100%;
+  /* The page itself never scrolls — the chat stream scrolls internally. This
+     keeps the composer pinned and stops iOS rubber-banding the whole UI. */
+  overflow: hidden;
+  overscroll-behavior: none;
 }
 
 body {
@@ -79,7 +83,11 @@ body {
 }
 
 #app {
-  height: 100%;
+  /* 100dvh (dynamic viewport height) — NOT 100vh/100% — so the composer at the
+     bottom is never hidden behind a mobile browser's address/tool bar. Mobile is
+     the primary client for this tool. 100vh is the fallback for old engines. */
+  height: 100vh;
+  height: 100dvh;
 }
 
 button {

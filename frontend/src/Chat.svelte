@@ -443,14 +443,16 @@
     flex: 1;
     resize: none;
     max-height: 168px;
-    min-height: 44px;
+    min-height: 48px;
     background: var(--bg-2);
     color: var(--ink);
     border: 1px solid var(--line-strong);
     border-radius: var(--radius-sm);
-    padding: 11px 13px;
+    padding: 12px 13px;
     font-family: var(--sans);
-    font-size: 14px;
+    /* 16px: anything smaller makes iOS Safari auto-zoom on focus (mobile is the
+       primary client) — the zoom then shifts the composer out of view. */
+    font-size: 16px;
     line-height: 1.5;
     outline: none;
     transition: border-color 0.15s, box-shadow 0.15s;
