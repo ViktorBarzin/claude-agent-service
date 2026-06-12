@@ -106,9 +106,9 @@
       <button class="retry" onclick={() => location.reload()}>Reload</button>
     </div>
   {:else}
-    <!-- read-only actions -->
-    <div class="group">
-      <div class="group-label">Inspect <span class="group-tag">read-only</span></div>
+    <!-- read-only actions (foldable) -->
+    <details class="group" open>
+      <summary class="group-label">Inspect <span class="group-tag">read-only</span></summary>
       <div class="btn-row">
         {#each nonMutating as v (v.name)}
           <button
@@ -122,13 +122,13 @@
           </button>
         {/each}
       </div>
-    </div>
+    </details>
 
-    <!-- mutating / power actions -->
-    <div class="group">
-      <div class="group-label group-label--danger">
+    <!-- mutating / power actions (foldable) -->
+    <details class="group" open>
+      <summary class="group-label group-label--danger">
         Power <span class="group-tag group-tag--danger">affects the running VM</span>
-      </div>
+      </summary>
       <div class="danger-list">
         {#each mutating as v (v.name)}
           <div class="danger-item {v.headline ? 'danger-item--headline' : ''}">
@@ -162,9 +162,9 @@
           </div>
         {/each}
       </div>
-    </div>
+    </details>
 
-    <!-- output -->
+    <!-- output (foldable; a long forensics dump scrolls inside a capped box) -->
     {#if actionError}
       <div class="block-error" role="alert">
         ⚠ Command failed to reach the host — {actionError}
@@ -172,8 +172,8 @@
     {/if}
 
     {#if output}
-      <div class="out {outputFailed ? 'out--fail' : 'out--ok'}">
-        <div class="out-head">
+      <details class="out {outputFailed ? 'out--fail' : 'out--ok'}" open>
+        <summary class="out-head">
           <code class="out-verb">{output.verb}</code>
           {#if output.rejected}
             <span class="out-status out-status--fail">rejected</span>
@@ -182,7 +182,7 @@
               exit {output.exit_code}
             </span>
           {/if}
-        </div>
+        </summary>
         {#if output.stdout}
           <pre class="out-pre">{output.stdout}</pre>
         {/if}
@@ -193,7 +193,7 @@
         {#if !output.stdout && !output.stderr}
           <pre class="out-pre out-pre--empty">(no output)</pre>
         {/if}
-      </div>
+      </details>
     {/if}
   {/if}
 </div>
@@ -558,5 +558,47 @@
   }
   .retry:hover {
     background: rgba(255, 77, 77, 0.12);
+  }
+
+  /* ── foldable sections (native <details>) ───────────────────────────────
+     Each group + the output dump fold away on small screens. Open by default
+     so nothing important is hidden; tap the header to collapse. */
+  details.group > summary,
+  details.out > summary {
+    list-style: none;
+    cursor: pointer;
+    user-select: none;
+  }
+  details.group > summary::-webkit-details-marker,
+  details.out > summary::-webkit-details-marker {
+    display: none;
+  }
+  /* disclosure caret on the left of each foldable header */
+  details.group > summary::before,
+  details.out > summary::before {
+    content: "▾";
+    display: inline-block;
+    width: 11px;
+    margin-right: 4px;
+    color: var(--ink-faint);
+    font-size: 9px;
+    transition: transform 0.15s ease;
+  }
+  details.group:not([open]) > summary::before,
+  details.out:not([open]) > summary::before {
+    transform: rotate(-90deg);
+  }
+  /* roomier tap target for the fold header on touch */
+  details.group > summary {
+    padding: 3px 0;
+  }
+  /* keep the exit-status pinned to the right now that a caret leads the row */
+  .out-head .out-status {
+    margin-left: auto;
+  }
+  /* a long dump (e.g. forensics) scrolls inside a capped box, not the page */
+  .out-pre {
+    max-height: 46vh;
+    overflow: auto;
   }
 </style>
