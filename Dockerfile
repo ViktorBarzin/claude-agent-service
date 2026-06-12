@@ -85,6 +85,17 @@ COPY agents/beads-task-runner.md /usr/share/agent-seed/beads-task-runner.md
 COPY agents/recruiter-triage.md /usr/share/agent-seed/recruiter-triage.md
 COPY agents/nextcloud-todos-planner.md /usr/share/agent-seed/nextcloud-todos-planner.md
 COPY agents/nextcloud-todos-exec.md /usr/share/agent-seed/nextcloud-todos-exec.md
+# The breakglass deployment (separate stack) seeds this one instead of the
+# untrusted-input agents; its init container copies whichever it needs.
+COPY agents/breakglass.md /usr/share/agent-seed/breakglass.md
+
+# Breakglass entrypoint. The breakglass Deployment overrides the default CMD
+# with this (ssh-agent bootstrap + ssh aliases, then uvicorn for the breakglass
+# app). It ships in every image but only that deployment runs it. The built
+# frontend lives under app/breakglass/static/ (committed — no in-cluster build,
+# per ADR-0002), so the `COPY app/` above carries it in.
+COPY docker-entrypoint-breakglass.sh /srv/docker-entrypoint-breakglass.sh
+RUN chmod 0755 /srv/docker-entrypoint-breakglass.sh
 
 USER agent
 WORKDIR /workspace/infra

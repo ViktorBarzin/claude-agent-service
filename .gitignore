@@ -10,3 +10,8 @@ vault
 
 # agent worktrees
 .worktrees/
+
+# breakglass frontend build tooling (node deps are never committed; the
+# compiled SPA in app/breakglass/static/ IS committed and served by FastAPI)
+frontend/node_modules/
+frontend/.vite/

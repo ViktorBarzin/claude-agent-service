@@ -1,0 +1,126 @@
+/* ───────────────────────────────────────────────────────────────────────────
+   devvm breakglass — global theme
+   A recovery console: dark, high-contrast, terminal-adjacent. Calm by default;
+   danger is the only loud thing on the screen. No external fonts/CDNs — system
+   monospace carries the identity, system sans carries readable prose.
+   ─────────────────────────────────────────────────────────────────────────── */
+
+:root {
+  /* Surfaces — a near-black slate with cool undertone, layered for depth. */
+  --bg-0: #07090c;       /* page base */
+  --bg-1: #0c1015;       /* panel */
+  --bg-2: #11171e;       /* raised panel / input */
+  --bg-3: #161d26;       /* chips, hover */
+  --bg-term: #06080a;    /* command-output panels */
+
+  /* Hairlines & text */
+  --line: #1d2630;
+  --line-strong: #2a3744;
+  --ink: #e6edf3;        /* primary text */
+  --ink-dim: #9bb0c0;    /* secondary text */
+  --ink-faint: #5d7185;  /* labels, meta */
+
+  /* Accents */
+  --cyan: #3dd1d6;       /* "system alive" — links, focus, session dot */
+  --cyan-dim: #1f6f72;
+  --amber: #f5b657;      /* working / in-flight */
+  --green: #5ddb8e;      /* healthy exit */
+  --green-dim: #1f5f3d;
+
+  /* Danger — reserved EXCLUSIVELY for mutating actions. Nothing else is red. */
+  --danger: #ff4d4d;
+  --danger-bright: #ff6363;
+  --danger-deep: #7a1717;
+  --danger-glow: rgba(255, 77, 77, 0.35);
+
+  --radius: 10px;
+  --radius-sm: 7px;
+
+  --mono: ui-monospace, "JetBrains Mono", "SF Mono", "Cascadia Code",
+    "Fira Code", Menlo, Consolas, "Liberation Mono", monospace;
+  --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+
+  --shadow-panel: 0 1px 0 rgba(255, 255, 255, 0.02) inset,
+    0 16px 40px -24px rgba(0, 0, 0, 0.9);
+
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  background-color: var(--bg-0);
+  /* Atmosphere: a soft cyan corner-glow over a faint scanline weave, so the
+     surface reads like backlit equipment rather than flat #000. */
+  background-image:
+    radial-gradient(120% 80% at 85% -10%, rgba(61, 209, 214, 0.07), transparent 55%),
+    radial-gradient(90% 70% at 10% 110%, rgba(245, 182, 87, 0.04), transparent 50%),
+    repeating-linear-gradient(
+      0deg,
+      rgba(255, 255, 255, 0.012) 0px,
+      rgba(255, 255, 255, 0.012) 1px,
+      transparent 1px,
+      transparent 3px
+    );
+  background-attachment: fixed;
+  color: var(--ink);
+  font-family: var(--sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+#app {
+  height: 100%;
+}
+
+button {
+  font-family: var(--mono);
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+}
+
+::selection {
+  background: rgba(61, 209, 214, 0.28);
+}
+
+/* Console scrollbars — thin, dark, unobtrusive. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
+}
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--line-strong);
+  border-radius: 99px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: #3a4a5a;
+  background-clip: content-box;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
