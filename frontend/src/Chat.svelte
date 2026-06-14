@@ -1,128 +1,105 @@
 <script>
   import { tick } from 'svelte';
-  import { streamChat } from './lib/api.js';
   import ToolChip from './ToolChip.svelte';
 
   let {
-    sessionId = '',
-    sessionReady = false,
-    onLiveSession = (/** @type {string} */ _id) => {},
-    onStreamingChange = (/** @type {boolean} */ _v) => {},
+    tx, // the folded transcript state (plain object, see lib/transcript.js)
+    rev = 0, // bumped on every in-place mutation to retrigger reactivity
+    caughtUp = false, // replay drained → staggered reveal may run
+    turnActive = false, // a turn is running: show Stop, hide Send
+    sending = false, // a prompt POST is in flight (brief)
+    linkState = 'connecting', // connecting | attached | error
+    onSubmit = (/** @type {string} */ _p) => {},
+    onStop = () => {},
   } = $props();
 
-  /**
-   * Message model. A user message is plain text. An assistant message is an
-   * ordered list of parts so streamed prose and tool chips interleave in the
-   * exact order the agent emitted them:
-   *   { role:'assistant', parts:[{type:'text',text}|{type:'tool',name,command}],
-   *     result?: {is_error, text, duration_ms}, error?: string }
-   * @type {Array<any>}
-   */
-  let messages = $state([]);
+  // The five quick-action presets — the mobile win: one tap, no typing.
+  const PRESETS = [
+    {
+      label: 'Triage',
+      icon: '◑',
+      prompt:
+        'Triage the devvm: uptime, load, memory, swap, disk usage, failed systemd units, and the last 30 lines of dmesg. Summarize what\'s wrong.',
+    },
+    {
+      label: 'Memory / OOM',
+      icon: '▦',
+      prompt:
+        'Check devvm memory pressure: free -h, top memory consumers, any recent OOM-kills in dmesg/journal, and swap usage. Is it OOMing?',
+    },
+    {
+      label: 'Disk',
+      icon: '▤',
+      prompt:
+        'What\'s filling the devvm disk? df -h, then the biggest directories/files under the fullest mount. Anything safe to clear?',
+    },
+    {
+      label: 'Services',
+      icon: '⚙',
+      prompt:
+        'List failed or stuck systemd units on the devvm (systemctl --failed) and show the status + recent journal lines for any that are down.',
+    },
+    {
+      label: 'QEMU wedged?',
+      icon: '◫',
+      prompt:
+        'Is the devvm\'s QEMU wedged (I/O stall)? Check guest responsiveness over SSH, then ssh pve forensics for VM 102\'s qm status/QMP/guest-agent. Tell me if a cycle is needed.',
+    },
+  ];
+
   let draft = $state('');
-  let streaming = $state(false);
-  let scroller; // the scroll viewport
+  let scroller;
   let inputEl;
-  let pinnedToBottom = true; // auto-scroll only while the user is at the bottom
+  let pinnedToBottom = true;
 
-  const canSend = $derived(sessionReady && !streaming && draft.trim().length > 0);
+  // re-derive the message list whenever the folder mutates (rev bump). The
+  // transcript is folded with in-place mutation on a $state.raw object, so no
+  // reference changes on its own — we depend on `rev` explicitly and rebuild
+  // fresh objects (message + its parts array) so Svelte's keyed {#each} re-
+  // renders streamed prose/chips on every token. Transcripts are small; the
+  // per-token copy is cheap and keeps the hot streaming path bug-free.
+  const messages = $derived(
+    rev >= 0 && tx
+      ? tx.messages.map((m) =>
+          m.role === 'assistant' ? { ...m, parts: m.parts.slice() } : { ...m }
+        )
+      : []
+  );
+  const isEmpty = $derived(messages.length === 0);
+  const canSend = $derived(linkState !== 'error' && !turnActive && draft.trim().length > 0);
+  const inputReady = $derived(!turnActive);
 
-  // ── scrolling ─────────────────────────────────────────────────────────────
+  // ── auto-scroll (only while pinned to the bottom) ─────────────────────────
   function onScroll() {
     if (!scroller) return;
     const gap = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
-    pinnedToBottom = gap < 60;
+    pinnedToBottom = gap < 64;
   }
   async function scrollToBottom(force = false) {
     if (!force && !pinnedToBottom) return;
     await tick();
     if (scroller) scroller.scrollTop = scroller.scrollHeight;
   }
-
-  // ── streaming a turn ────────────────────────────────────────────────────────
-  function lastAssistant() {
-    return messages[messages.length - 1];
-  }
-
-  function appendText(text) {
-    const msg = lastAssistant();
-    const parts = msg.parts;
-    const tail = parts[parts.length - 1];
-    if (tail && tail.type === 'text') {
-      tail.text += text;
-    } else {
-      parts.push({ type: 'text', text });
-    }
-    messages = messages; // notify Svelte of the in-place mutation
-  }
-
-  function handleEvent(ev) {
-    switch (ev?.kind) {
-      case 'session':
-        onLiveSession(ev.session_id);
-        break;
-      case 'text':
-        if (ev.text) appendText(ev.text);
-        break;
-      case 'tool': {
-        // Bash carries a `command`; other tools just show their name.
-        const command =
-          ev.input && typeof ev.input.command === 'string' ? ev.input.command : '';
-        lastAssistant().parts.push({ type: 'tool', name: ev.name || 'tool', command });
-        messages = messages;
-        break;
-      }
-      case 'result':
-        lastAssistant().result = {
-          is_error: Boolean(ev.is_error),
-          text: typeof ev.result === 'string' ? ev.result : '',
-          duration_ms: typeof ev.duration_ms === 'number' ? ev.duration_ms : null,
-        };
-        messages = messages;
-        break;
-      case 'error':
-        lastAssistant().error = ev.error || 'unknown error';
-        messages = messages;
-        break;
-      case 'done':
-        // handled by the stream completing; nothing to render
-        break;
-      default:
-        break;
-    }
+  // any transcript change → keep the view pinned if the user is at the bottom
+  $effect(() => {
+    rev; // track
     scrollToBottom();
+  });
+
+  function fire(prompt) {
+    if (turnActive) return;
+    pinnedToBottom = true;
+    onSubmit(prompt);
+    scrollToBottom(true);
   }
 
-  async function send() {
-    const prompt = draft.trim();
-    if (!prompt || streaming || !sessionReady) return;
-
-    messages.push({ role: 'user', text: prompt });
-    messages.push({ role: 'assistant', parts: [] });
-    messages = messages;
+  function send() {
+    const text = draft.trim();
+    if (!text || turnActive) return;
     draft = '';
-    streaming = true;
-    onStreamingChange(true);
-    pinnedToBottom = true;
-    await scrollToBottom(true);
-
-    try {
-      await streamChat({ session_id: sessionId, prompt }, handleEvent);
-    } catch (err) {
-      // Network/transport failure (backend down, connection dropped mid-stream).
-      const msg = lastAssistant();
-      if (msg && msg.role === 'assistant' && !msg.error) {
-        msg.error =
-          (err instanceof Error ? err.message : String(err)) +
-          ' — the connection to the agent failed.';
-        messages = messages;
-      }
-    } finally {
-      streaming = false;
-      onStreamingChange(false);
-      await scrollToBottom();
-      inputEl?.focus();
-    }
+    fire(text);
+    // restore single-row height after clearing
+    tick().then(() => inputEl?.focus());
   }
 
   function onKeydown(e) {
@@ -130,7 +107,7 @@
       e.preventDefault();
       send();
     }
-    // Shift+Enter falls through to insert a newline.
+    // Shift+Enter → newline (default behaviour)
   }
 
   function fmtDuration(ms) {
@@ -139,7 +116,12 @@
     return `${(ms / 1000).toFixed(ms < 10000 ? 1 : 0)} s`;
   }
 
-  const isEmpty = $derived(messages.length === 0);
+  // a freshly-attached transcript reveals with a brief stagger; cap the delay
+  // so a long replay doesn't animate forever.
+  function revealDelay(i) {
+    if (!caughtUp) return 0;
+    return Math.min(i, 6) * 45;
+  }
 </script>
 
 <div class="chat">
@@ -150,41 +132,58 @@
 
   <div class="stream" bind:this={scroller} onscroll={onScroll}>
     {#if isEmpty}
-      <div class="empty">
-        <div class="empty-mark">⌁</div>
-        <p class="empty-title">The agent is standing by.</p>
+      <div class="empty" class:dim={linkState === 'connecting'}>
+        <div class="empty-mark" aria-hidden="true">⌁</div>
+        <p class="empty-title">
+          {#if linkState === 'error'}
+            The agent is unreachable.
+          {:else if linkState === 'connecting'}
+            Attaching to the session…
+          {:else}
+            The agent is standing by.
+          {/if}
+        </p>
         <p class="empty-sub">
-          Describe the symptom — "devvm is unreachable", "disk full", "ssh hangs"
-          — and it will connect over SSH, investigate, and stream its work here.
-          For a hard power action when the agent can't help, use
-          <strong>Direct VM control</strong>.
+          {#if linkState === 'error'}
+            The cluster or network may be down. You can still power-cycle the VM
+            with <strong>⚡ Direct VM control</strong> — it needs no agent.
+          {:else}
+            Tap a preset below or describe the symptom — "devvm unreachable",
+            "disk full", "ssh hangs" — and it will connect over SSH, investigate,
+            and stream its work here. For a hard power action, use
+            <strong>⚡ Direct VM control</strong>.
+          {/if}
         </p>
       </div>
     {/if}
 
-    {#each messages as msg, i (i)}
+    {#each messages as msg (msg.key)}
       {#if msg.role === 'user'}
-        <div class="row row--user">
+        <div class="row row--user rise-in" style="--d:{revealDelay(0)}ms">
           <div class="bubble bubble--user">{msg.text}</div>
         </div>
       {:else}
-        <div class="row row--assistant">
+        <div class="row row--assistant rise-in" style="--d:{revealDelay(0)}ms">
           <div class="bubble bubble--assistant">
-            {#if msg.parts.length === 0 && !msg.result && !msg.error}
+            {#if msg.parts.length === 0 && !msg.result && !msg.error && !msg.cancelled}
               <span class="thinking" aria-label="working">
                 <span></span><span></span><span></span>
               </span>
             {/if}
             {#each msg.parts as part, j (j)}
-              {#if part.type === 'text'}
-                <span class="prose">{part.text}</span>
-              {:else}
-                <ToolChip name={part.name} command={part.command} />
-              {/if}
+              {#if part.type === 'text'}<span class="prose">{part.text}</span>{:else}<ToolChip name={part.name} command={part.command} />{/if}
             {/each}
 
             {#if msg.error}
-              <div class="turn-note turn-note--error">⚠ {msg.error}</div>
+              <div class="turn-note turn-note--error">
+                <span class="turn-note-tag">error</span>
+                <span class="turn-note-body">{msg.error}</span>
+              </div>
+            {:else if msg.cancelled}
+              <div class="turn-note turn-note--muted">
+                <span class="turn-note-tag">stopped</span>
+                <span class="turn-note-body">turn cancelled</span>
+              </div>
             {:else if msg.result}
               <div class="turn-note {msg.result.is_error ? 'turn-note--error' : 'turn-note--ok'}">
                 <span class="turn-note-tag">{msg.result.is_error ? 'failed' : 'done'}</span>
@@ -200,36 +199,61 @@
     {/each}
   </div>
 
-  <form
-    class="composer"
-    onsubmit={(e) => {
-      e.preventDefault();
-      send();
-    }}
-  >
-    {#if streaming}
-      <div class="working-bar" aria-live="polite">
-        <span class="working-dots"><span></span><span></span><span></span></span>
-        agent working — streaming live
-      </div>
-    {/if}
-    <div class="composer-row">
-      <textarea
-        bind:this={inputEl}
-        bind:value={draft}
-        onkeydown={onKeydown}
-        placeholder={sessionReady
-          ? 'Describe the problem…  (Enter to send · Shift+Enter for a new line)'
-          : 'Waiting for a session…'}
-        rows="1"
-        disabled={!sessionReady || streaming}
-        spellcheck="false"
-      ></textarea>
-      <button type="submit" class="send" disabled={!canSend}>
-        {streaming ? '…' : 'Send'}
-      </button>
+  <div class="dock">
+    <!-- quick-action preset bar: horizontally scrollable, one-tap prompts -->
+    <div class="presets" role="group" aria-label="Quick actions">
+      {#each PRESETS as p (p.label)}
+        <button
+          class="preset"
+          onclick={() => fire(p.prompt)}
+          disabled={turnActive || linkState === 'error'}
+          title={p.prompt}
+        >
+          <span class="preset-icon" aria-hidden="true">{p.icon}</span>
+          <span class="preset-label">{p.label}</span>
+        </button>
+      {/each}
     </div>
-  </form>
+
+    <form
+      class="composer"
+      onsubmit={(e) => {
+        e.preventDefault();
+        send();
+      }}
+    >
+      {#if turnActive}
+        <div class="working-bar" aria-live="polite">
+          <span class="working-dots"><span></span><span></span><span></span></span>
+          <span>agent working — streaming live</span>
+        </div>
+      {/if}
+      <div class="composer-row">
+        <textarea
+          bind:this={inputEl}
+          bind:value={draft}
+          onkeydown={onKeydown}
+          placeholder={inputReady
+            ? 'Describe the problem…  (Enter to send · Shift+Enter for a new line)'
+            : 'A turn is running — Stop it to type, or wait…'}
+          rows="1"
+          disabled={!inputReady}
+          spellcheck="false"
+          enterkeyhint="send"
+        ></textarea>
+        {#if turnActive}
+          <button type="button" class="stop" onclick={onStop} title="Stop the running turn">
+            <span class="stop-glyph" aria-hidden="true"></span>
+            Stop
+          </button>
+        {:else}
+          <button type="submit" class="send" disabled={!canSend}>
+            {sending ? '···' : 'Send'}
+          </button>
+        {/if}
+      </div>
+    </form>
+  </div>
 </div>
 
 <style>
@@ -249,9 +273,10 @@
     display: flex;
     align-items: baseline;
     gap: 12px;
-    padding: 13px 18px;
+    padding: 12px 18px;
     border-bottom: 1px solid var(--line);
-    background: linear-gradient(180deg, rgba(255, 255, 255, 0.015), transparent);
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.018), transparent);
+    flex: none;
   }
   .chat-head-label {
     font-family: var(--mono);
@@ -263,13 +288,16 @@
   .chat-head-hint {
     font-size: 12px;
     color: var(--ink-faint);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   .stream {
     flex: 1;
     min-height: 0;
     overflow-y: auto;
-    padding: 20px 18px 8px;
+    padding: 20px 16px 10px;
     display: flex;
     flex-direction: column;
     gap: 14px;
@@ -279,23 +307,27 @@
   /* empty state */
   .empty {
     margin: auto;
-    max-width: 460px;
+    max-width: 470px;
     text-align: center;
-    padding: 28px 12px;
+    padding: 24px 14px;
     color: var(--ink-dim);
   }
+  .empty.dim { opacity: 0.8; }
   .empty-mark {
-    font-size: 40px;
+    font-size: 42px;
     color: var(--cyan-dim);
     line-height: 1;
     margin-bottom: 14px;
-    text-shadow: 0 0 24px rgba(61, 209, 214, 0.25);
+    text-shadow: 0 0 26px rgba(61, 209, 214, 0.3);
+    animation: lamp-breathe 3.6s ease-in-out infinite;
   }
+  @keyframes lamp-breathe { 0%, 100% { opacity: 0.7; } 50% { opacity: 1; } }
   .empty-title {
     font-family: var(--mono);
     color: var(--ink);
     font-size: 15px;
     margin: 0 0 8px;
+    letter-spacing: 0.01em;
   }
   .empty-sub {
     font-size: 13px;
@@ -303,32 +335,23 @@
     color: var(--ink-faint);
     margin: 0;
   }
-  .empty-sub strong {
-    color: var(--ink-dim);
-    font-weight: 600;
-  }
+  .empty-sub strong { color: var(--ink-dim); font-weight: 600; }
 
-  .row {
-    display: flex;
-  }
-  .row--user {
-    justify-content: flex-end;
-  }
-  .row--assistant {
-    justify-content: flex-start;
-  }
+  .row { display: flex; }
+  .row--user { justify-content: flex-end; }
+  .row--assistant { justify-content: flex-start; }
 
   .bubble {
-    max-width: 86%;
+    max-width: 88%;
     border-radius: 13px;
     padding: 11px 14px;
     font-size: 14px;
-    line-height: 1.6;
+    line-height: 1.62;
     word-wrap: break-word;
     overflow-wrap: anywhere;
   }
   .bubble--user {
-    background: linear-gradient(180deg, #15333a, #0f262c);
+    background: linear-gradient(180deg, #123036, #0d2329);
     border: 1px solid var(--cyan-dim);
     color: #d8f6f7;
     border-bottom-right-radius: 4px;
@@ -341,12 +364,9 @@
     border-bottom-left-radius: 4px;
     color: var(--ink);
   }
-  /* prose renders inline so text and tool chips share the same flow */
-  .prose {
-    white-space: pre-wrap;
-  }
+  .prose { white-space: pre-wrap; }
 
-  /* in-flight assistant "thinking" dots */
+  /* in-flight "thinking" dots */
   .thinking,
   .working-dots {
     display: inline-flex;
@@ -363,19 +383,15 @@
     animation: blink 1.2s infinite ease-in-out;
   }
   .thinking span:nth-child(2),
-  .working-dots span:nth-child(2) {
-    animation-delay: 0.18s;
-  }
+  .working-dots span:nth-child(2) { animation-delay: 0.18s; }
   .thinking span:nth-child(3),
-  .working-dots span:nth-child(3) {
-    animation-delay: 0.36s;
-  }
+  .working-dots span:nth-child(3) { animation-delay: 0.36s; }
   @keyframes blink {
     0%, 80%, 100% { opacity: 0.25; transform: translateY(0); }
     40% { opacity: 1; transform: translateY(-2px); }
   }
 
-  /* turn result / error footer inside the assistant bubble */
+  /* turn result / error / stopped footer inside the assistant bubble */
   .turn-note {
     margin-top: 10px;
     padding: 7px 10px;
@@ -396,9 +412,16 @@
     color: #bff5d3;
   }
   .turn-note--error {
-    background: rgba(255, 77, 77, 0.08);
-    border: 1px solid var(--danger-deep);
-    color: #ffd5d5;
+    /* the error tint here is amber-leaning text on a faint warm wash, NOT the
+       reserved power-action red — a turn error is not a destructive action. */
+    background: rgba(245, 182, 87, 0.06);
+    border: 1px solid var(--amber-dim);
+    color: #f7d49a;
+  }
+  .turn-note--muted {
+    background: rgba(255, 255, 255, 0.02);
+    border: 1px solid var(--line-strong);
+    color: var(--ink-faint);
   }
   .turn-note-tag {
     text-transform: uppercase;
@@ -409,20 +432,55 @@
     border: 1px solid currentColor;
     opacity: 0.85;
   }
-  .turn-note-body {
-    flex: 1;
-    min-width: 0;
-  }
-  .turn-note-time {
-    margin-left: auto;
-    color: var(--ink-faint);
+  .turn-note-body { flex: 1; min-width: 0; }
+  .turn-note-time { margin-left: auto; color: var(--ink-faint); }
+
+  /* ── dock: presets + composer, pinned to the bottom ────────────────────── */
+  .dock {
+    flex: none;
+    border-top: 1px solid var(--line);
+    background: linear-gradient(0deg, rgba(255, 255, 255, 0.015), transparent);
   }
 
-  /* ── composer ─────────────────────────────────────────────────────────── */
+  .presets {
+    display: flex;
+    gap: 8px;
+    overflow-x: auto;
+    padding: 11px 12px 4px;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+    /* fade the right edge to hint there's more to scroll */
+    mask-image: linear-gradient(90deg, transparent 0, #000 14px, #000 calc(100% - 18px), transparent 100%);
+  }
+  .presets::-webkit-scrollbar { display: none; }
+  .preset {
+    flex: none;
+    min-height: 38px;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 0 13px;
+    border-radius: 999px;
+    border: 1px solid var(--line-strong);
+    background: var(--bg-2);
+    color: var(--ink-dim);
+    font-family: var(--mono);
+    font-size: 12.5px;
+    letter-spacing: 0.02em;
+    white-space: nowrap;
+    transition: border-color 0.15s, color 0.15s, background 0.15s, transform 0.06s;
+  }
+  .preset:hover:not(:disabled) {
+    border-color: var(--cyan-dim);
+    color: var(--ink);
+    background: var(--bg-3);
+  }
+  .preset:active:not(:disabled) { transform: translateY(1px); }
+  .preset:disabled { opacity: 0.4; }
+  .preset-icon { color: var(--cyan); font-size: 12px; }
+
   .composer {
-    border-top: 1px solid var(--line);
-    padding: 12px;
-    background: linear-gradient(0deg, rgba(255, 255, 255, 0.012), transparent);
+    padding: 8px 12px calc(12px + var(--safe-bottom));
   }
   .working-bar {
     display: flex;
@@ -431,7 +489,7 @@
     font-family: var(--mono);
     font-size: 12px;
     color: var(--amber);
-    padding: 0 4px 9px;
+    padding: 2px 4px 9px;
     letter-spacing: 0.02em;
   }
   .composer-row {
@@ -442,13 +500,13 @@
   textarea {
     flex: 1;
     resize: none;
-    max-height: 168px;
+    max-height: 160px;
     min-height: 48px;
     background: var(--bg-2);
     color: var(--ink);
     border: 1px solid var(--line-strong);
     border-radius: var(--radius-sm);
-    padding: 12px 13px;
+    padding: 13px 13px;
     font-family: var(--sans);
     /* 16px: anything smaller makes iOS Safari auto-zoom on focus (mobile is the
        primary client) — the zoom then shifts the composer out of view. */
@@ -458,39 +516,60 @@
     transition: border-color 0.15s, box-shadow 0.15s;
     field-sizing: content; /* progressive: auto-grows where supported */
   }
-  textarea::placeholder {
-    color: var(--ink-faint);
-  }
+  textarea::placeholder { color: var(--ink-faint); }
   textarea:focus {
     border-color: var(--cyan-dim);
     box-shadow: 0 0 0 3px rgba(61, 209, 214, 0.12);
   }
-  textarea:disabled {
-    opacity: 0.55;
-  }
+  textarea:disabled { opacity: 0.55; }
 
-  .send {
+  .send,
+  .stop {
     flex: none;
     align-self: stretch;
-    min-width: 78px;
+    min-width: 82px;
+    min-height: 48px;
     padding: 0 18px;
     border-radius: var(--radius-sm);
-    border: 1px solid var(--cyan-dim);
-    background: linear-gradient(180deg, #19474b, #103539);
-    color: #d8f6f7;
     font-size: 13px;
     font-weight: 600;
-    letter-spacing: 0.04em;
-    transition: filter 0.15s, border-color 0.15s, opacity 0.15s;
+    letter-spacing: 0.05em;
+    transition: filter 0.15s, border-color 0.15s, opacity 0.15s, background 0.15s;
   }
-  .send:hover:not(:disabled) {
-    filter: brightness(1.22);
-    border-color: var(--cyan);
+  .send {
+    border: 1px solid var(--cyan-dim);
+    background: linear-gradient(180deg, #16464a, #0e3438);
+    color: #d8f6f7;
   }
+  .send:hover:not(:disabled) { filter: brightness(1.24); border-color: var(--cyan); }
   .send:disabled {
     opacity: 0.4;
     background: var(--bg-2);
     border-color: var(--line-strong);
     color: var(--ink-faint);
+  }
+  /* Stop is NOT red — red is reserved for destructive VM power. Stop is a calm
+     neutral control with a square "halt" glyph. */
+  .stop {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    border: 1px solid var(--line-bright);
+    background: var(--bg-3);
+    color: var(--ink);
+  }
+  .stop:hover { border-color: var(--ink-faint); filter: brightness(1.1); }
+  .stop-glyph {
+    width: 10px;
+    height: 10px;
+    border-radius: 2px;
+    background: var(--amber);
+    box-shadow: 0 0 8px rgba(245, 182, 87, 0.55);
+    animation: lamp-pulse 1s ease-in-out infinite;
+  }
+  @keyframes lamp-pulse {
+    0%, 100% { transform: scale(0.85); opacity: 0.8; }
+    50% { transform: scale(1.08); opacity: 1; }
   }
 </style>

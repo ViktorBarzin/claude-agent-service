@@ -1,38 +1,44 @@
 """Breakglass FastAPI app — the in-cluster emergency recovery UI.
 
+The chat uses the tmux/attach model (see session.py): the server owns the
+conversation; clients attach over SSE and the turn keeps running if they
+disconnect.
+
 Routes:
-  GET  /health                 — liveness (no auth)
-  GET  /                       — the single-page UI (static)
-  POST /api/session            — open a chat session, returns {session_id}
-  POST /api/chat               — run one turn, streams SSE events (text/tool/result)
-  POST /api/pve/{verb}         — LLM-independent PVE power verb (manual buttons)
-  GET  /api/pve/verbs          — list allowed verbs + which mutate
+  GET  /health                        — liveness (no auth)
+  GET  /                              — the single-page UI (static)
+  POST /api/session                   — create a session, returns {session_id}
+  GET  /api/session/{id}/stream       — ATTACH (SSE): replay + live tail
+  POST /api/session/{id}/prompt       — run a turn (detached; survives disconnect)
+  POST /api/session/{id}/cancel       — stop the in-flight turn
+  GET  /api/pve/verbs                 — list allowed verbs + which mutate
+  POST /api/pve/{verb}                — LLM-independent PVE power verb (buttons)
 
 Everything under /api requires auth (edge Authentik header or bearer token).
 """
-import json
 import os
-import uuid
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import agent_session, config, pve
+from . import config, pve
 from .auth import require_auth
+from .session import SessionManager, attach_stream
 
 app = FastAPI(title="Claude Breakglass")
 
 _STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
+
+manager = SessionManager()
 
 
 class SessionResponse(BaseModel):
     session_id: str
 
 
-class ChatRequest(BaseModel):
-    session_id: str
+class PromptRequest(BaseModel):
     prompt: str = Field(..., min_length=1)
     model: str | None = None
 
@@ -44,28 +50,51 @@ async def health():
 
 @app.post("/api/session", response_model=SessionResponse)
 async def open_session(_identity: str = Depends(require_auth)):
-    # Claude wants a UUID for --session-id.
-    return SessionResponse(session_id=str(uuid.uuid4()))
+    return SessionResponse(session_id=manager.create().id)
 
 
-@app.post("/api/chat")
-async def chat(req: ChatRequest, _identity: str = Depends(require_auth)):
-    """Stream one chat turn as Server-Sent Events. The browser reads the
-    response body incrementally (fetch + ReadableStream)."""
-
-    async def _sse():
-        try:
-            async for ev in agent_session.run_turn(req.session_id, req.prompt, req.model):
-                yield f"data: {json.dumps(ev)}\n\n"
-        except Exception as exc:  # noqa: BLE001 — surface any failure to the UI
-            yield f"data: {json.dumps({'kind': 'error', 'error': str(exc)[:500]})}\n\n"
-        yield f"data: {json.dumps({'kind': 'done'})}\n\n"
-
+@app.get("/api/session/{session_id}/stream")
+async def attach(
+    session_id: str,
+    _identity: str = Depends(require_auth),
+    last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
+):
+    """Attach to a session (SSE). Replays the conversation so far, then tails
+    live. On an EventSource auto-reconnect the browser sends Last-Event-ID, so we
+    replay only what was missed."""
+    session = manager.get(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="session not found")
+    try:
+        leid = int(last_event_id) if last_event_id is not None else None
+    except ValueError:
+        leid = None
     return StreamingResponse(
-        _sse(),
+        attach_stream(session, leid),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
     )
+
+
+@app.post("/api/session/{session_id}/prompt")
+async def prompt(session_id: str, req: PromptRequest, _identity: str = Depends(require_auth)):
+    """Start a turn. It runs DETACHED (keeps going if the client disconnects);
+    output is delivered via the attach stream, not this response."""
+    session = manager.get(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="session not found")
+    if not session.start_turn(req.prompt, req.model):
+        raise HTTPException(status_code=409, detail="a turn is already running")
+    return {"status": "started"}
+
+
+@app.post("/api/session/{session_id}/cancel")
+async def cancel(session_id: str, _identity: str = Depends(require_auth)):
+    session = manager.get(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="session not found")
+    cancelled = await session.cancel()
+    return {"cancelled": cancelled}
 
 
 @app.get("/api/pve/verbs")

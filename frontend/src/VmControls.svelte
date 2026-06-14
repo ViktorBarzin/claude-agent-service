@@ -293,7 +293,8 @@
     align-items: center;
     justify-content: center;
     gap: 8px;
-    padding: 9px 15px;
+    min-height: 44px; /* touch target */
+    padding: 10px 16px;
     border-radius: var(--radius-sm);
     font-size: 13px;
     font-weight: 600;
@@ -408,7 +409,8 @@
   }
   .confirm-yes {
     flex: 1;
-    padding: 9px;
+    min-height: 44px;
+    padding: 10px;
     border-radius: var(--radius-sm);
     border: 1px solid var(--danger-bright);
     background: var(--danger);
@@ -424,7 +426,8 @@
   }
   .confirm-no {
     flex: 1;
-    padding: 9px;
+    min-height: 44px;
+    padding: 10px;
     border-radius: var(--radius-sm);
     border: 1px solid var(--line-strong);
     background: var(--bg-2);

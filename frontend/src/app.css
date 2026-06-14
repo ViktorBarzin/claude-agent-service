@@ -1,48 +1,70 @@
 /* ───────────────────────────────────────────────────────────────────────────
    devvm breakglass — global theme
-   A recovery console: dark, high-contrast, terminal-adjacent. Calm by default;
-   danger is the only loud thing on the screen. No external fonts/CDNs — system
-   monospace carries the identity, system sans carries readable prose.
+   Emergency recovery console / instrument panel. Dark, high-contrast, monospace
+   identity, calm by default. Danger (red) is reserved EXCLUSIVELY for the
+   destructive VM power actions — nothing else on the screen is ever red. No
+   external fonts/CDNs (air-gapped cluster): a refined system-monospace stack
+   carries the identity, system-sans carries readable prose. Distinctiveness is
+   earned through composition, the living "system pulse" lamp, motion, hairlines,
+   and the reserved danger treatment — not through a downloaded typeface.
    ─────────────────────────────────────────────────────────────────────────── */
 
 :root {
-  /* Surfaces — a near-black slate with cool undertone, layered for depth. */
-  --bg-0: #07090c;       /* page base */
-  --bg-1: #0c1015;       /* panel */
-  --bg-2: #11171e;       /* raised panel / input */
-  --bg-3: #161d26;       /* chips, hover */
-  --bg-term: #06080a;    /* command-output panels */
+  /* Surfaces — a near-black slate with a cool undertone, layered for depth. */
+  --bg-0: #06080b;       /* page base (darkened from #07090c for crisper AA) */
+  --bg-1: #0b0f14;       /* panel */
+  --bg-2: #10161d;       /* raised panel / input */
+  --bg-3: #161e27;       /* chips, hover */
+  --bg-term: #05070a;    /* command-output panels */
 
   /* Hairlines & text */
-  --line: #1d2630;
+  --line: #1c2530;
   --line-strong: #2a3744;
-  --ink: #e6edf3;        /* primary text */
-  --ink-dim: #9bb0c0;    /* secondary text */
-  --ink-faint: #5d7185;  /* labels, meta */
+  --line-bright: #3a4a5a;
+  --ink: #e9eff5;        /* primary text */
+  --ink-dim: #9bb0c0;    /* secondary text — 8.0:1 on bg-2 */
+  /* labels/meta — was #5d7185 (3.6:1, fails AA). Lifted to 6.1:1 on bg-2. */
+  --ink-faint: #8499ab;
 
-  /* Accents */
-  --cyan: #3dd1d6;       /* "system alive" — links, focus, session dot */
+  /* Accents — the "alive" cyan is the spine of the calm palette. */
+  --cyan: #3dd1d6;       /* "system alive" — links, focus, session pulse */
+  --cyan-bright: #62e3e7;
   --cyan-dim: #1f6f72;
+  --cyan-deep: #0e3133;
   --amber: #f5b657;      /* working / in-flight */
+  --amber-dim: #6a5226;
   --green: #5ddb8e;      /* healthy exit */
   --green-dim: #1f5f3d;
 
-  /* Danger — reserved EXCLUSIVELY for mutating actions. Nothing else is red. */
+  /* Danger — reserved EXCLUSIVELY for mutating power actions. Nothing else red. */
   --danger: #ff4d4d;
   --danger-bright: #ff6363;
   --danger-deep: #7a1717;
   --danger-glow: rgba(255, 77, 77, 0.35);
 
-  --radius: 10px;
-  --radius-sm: 7px;
+  --radius: 11px;
+  --radius-sm: 8px;
+  --radius-lg: 16px;
 
-  --mono: ui-monospace, "JetBrains Mono", "SF Mono", "Cascadia Code",
-    "Fira Code", Menlo, Consolas, "Liberation Mono", monospace;
+  /* A refined, deliberately-ordered monospace stack. We lead with faces that
+     have real character (Berkeley Mono / JetBrains / Cascadia / SF Mono) and
+     fall back gracefully — but ship nothing; whatever the device has carries
+     the cockpit-readout identity. */
+  --mono: "Berkeley Mono", ui-monospace, "JetBrains Mono", "SF Mono",
+    "Cascadia Code", "Fira Code", "Source Code Pro", Menlo, Consolas,
+    "Liberation Mono", monospace;
   --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
     "Helvetica Neue", Arial, sans-serif;
 
-  --shadow-panel: 0 1px 0 rgba(255, 255, 255, 0.02) inset,
-    0 16px 40px -24px rgba(0, 0, 0, 0.9);
+  --shadow-panel: 0 1px 0 rgba(255, 255, 255, 0.025) inset,
+    0 18px 44px -26px rgba(0, 0, 0, 0.95);
+  --shadow-sheet: 0 -22px 48px -12px rgba(0, 0, 0, 0.7);
+
+  /* Safe-area shorthands (notch / home-indicator). 0px fallback off-device. */
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
 
   color-scheme: dark;
 }
@@ -55,23 +77,24 @@ html,
 body {
   margin: 0;
   height: 100%;
-  /* The page itself never scrolls — the chat stream scrolls internally. This
-     keeps the composer pinned and stops iOS rubber-banding the whole UI. */
+  /* The page itself never scrolls — only the chat stream scrolls internally.
+     This keeps the composer pinned and stops iOS rubber-banding the whole UI. */
   overflow: hidden;
   overscroll-behavior: none;
 }
 
 body {
   background-color: var(--bg-0);
-  /* Atmosphere: a soft cyan corner-glow over a faint scanline weave, so the
-     surface reads like backlit equipment rather than flat #000. */
+  /* Atmosphere: a soft cyan corner-glow + a faint warm counter-glow over a
+     hairline scanline weave, so the surface reads as backlit equipment rather
+     than flat black. Fixed so it doesn't drift when the chat scrolls. */
   background-image:
-    radial-gradient(120% 80% at 85% -10%, rgba(61, 209, 214, 0.07), transparent 55%),
-    radial-gradient(90% 70% at 10% 110%, rgba(245, 182, 87, 0.04), transparent 50%),
+    radial-gradient(120% 78% at 86% -12%, rgba(61, 209, 214, 0.08), transparent 55%),
+    radial-gradient(90% 70% at 8% 112%, rgba(245, 182, 87, 0.045), transparent 52%),
     repeating-linear-gradient(
       0deg,
-      rgba(255, 255, 255, 0.012) 0px,
-      rgba(255, 255, 255, 0.012) 1px,
+      rgba(255, 255, 255, 0.013) 0px,
+      rgba(255, 255, 255, 0.013) 1px,
       transparent 1px,
       transparent 3px
     );
@@ -84,8 +107,8 @@ body {
 
 #app {
   /* 100dvh (dynamic viewport height) — NOT 100vh/100% — so the composer at the
-     bottom is never hidden behind a mobile browser's address/tool bar. Mobile is
-     the primary client for this tool. 100vh is the fallback for old engines. */
+     bottom is never hidden behind a mobile browser's address/tool bar. 100vh is
+     the fallback for engines without dvh. Mobile is the primary client. */
   height: 100vh;
   height: 100dvh;
 }
@@ -94,7 +117,6 @@ button {
   font-family: var(--mono);
   cursor: pointer;
 }
-
 button:disabled {
   cursor: not-allowed;
 }
@@ -119,8 +141,24 @@ button:disabled {
   background-clip: content-box;
 }
 *::-webkit-scrollbar-thumb:hover {
-  background: #3a4a5a;
+  background: var(--line-bright);
   background-clip: content-box;
+}
+
+/* ── Shared motion primitives ──────────────────────────────────────────────
+   One well-orchestrated entrance beats scattered micro-interactions: panels
+   and rows rise a few px with a soft fade, staggered via --d on each element. */
+@keyframes rise-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.rise-in {
+  animation: rise-in 0.5s cubic-bezier(0.22, 0.61, 0.36, 1) both;
+  animation-delay: var(--d, 0ms);
 }
 
 @media (prefers-reduced-motion: reduce) {

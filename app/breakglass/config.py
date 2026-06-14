@@ -25,6 +25,9 @@ MAX_CONCURRENT_TURNS = int(os.environ.get("BREAKGLASS_MAX_CONCURRENT_TURNS", "2"
 TURN_TIMEOUT_SECONDS = int(os.environ.get("BREAKGLASS_TURN_TIMEOUT_SECONDS", "1800"))
 # A single PVE power verb must return fast; a wedged host shouldn't hang the UI.
 PVE_VERB_TIMEOUT_SECONDS = int(os.environ.get("BREAKGLASS_PVE_VERB_TIMEOUT_SECONDS", "120"))
+# How long an idle attach stream waits before emitting an SSE keepalive comment
+# (keeps proxies/CDN from closing the long-lived connection).
+SSE_KEEPALIVE_SECONDS = int(os.environ.get("BREAKGLASS_SSE_KEEPALIVE_SECONDS", "20"))
 
 # Auth. The app sits behind the ingress `auth = "required"` resilience proxy
 # (Authentik SSO, basic-auth fallback when Authentik is down). We additionally
