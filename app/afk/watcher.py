@@ -7,10 +7,11 @@ and the fix-forward bookkeeping), one ``tick``:
 
   1. **assemble a ``RunState``** from the live edges + the run's bookkeeping:
        * ``thread_status`` — from ``t3_client.snapshot()``, by finding this run's
-         thread and mapping T3's ``running``/``idle``/``error`` to a
-         ``ThreadStatus`` (missing thread, or any unrecognised status, folds to
-         ``None`` → "no status yet" → the state machine WAITs; we never escalate
-         or close on a status we don't understand);
+         thread and mapping its ``latestTurn.state`` (``completed`` → idle,
+         ``running``/``in_progress``/``pending`` → running, ``errored`` → error)
+         to a ``ThreadStatus`` (missing thread, no turn yet, or any unrecognised
+         state folds to ``None`` → "no status yet" → the state machine WAITs; we
+         never escalate or close on a status we don't understand);
        * ``ci_status`` — ``ci_watcher.status(repo, commit)`` *only* when a commit
          is pushed (no commit ⇒ nothing to check ⇒ ``None``);
        * ``pushed`` / ``fix_forward_attempts`` / ``elapsed_seconds`` — straight
@@ -50,13 +51,22 @@ from .notifier import KIND_DONE, KIND_FROZEN, KIND_NEEDS_HUMAN
 from .poller import T3Port as _DispatchPort  # dispatch(repo, issue, prompt) -> id
 from .types import Action, CIStatus, Config, Issue, Phase, RunState, ThreadStatus
 
-# T3 snapshot status string -> ThreadStatus. Anything not in here (a status T3
-# adds later, or a malformed entry) maps to None — "no usable status yet" — so
-# the state machine waits rather than acting on something it can't interpret.
+# T3 ``latestTurn.state`` -> ThreadStatus. The real snapshot reports a thread's
+# liveness as the state of its latest turn (verified against t3-afk v0.0.27):
+# ``completed`` == the turn finished cleanly (agent is idle, awaiting input);
+# any not-yet-finished state (``running``/``in_progress``/``pending``/``queued``/
+# ``pendingInit``) == still working; ``errored`` == the turn failed. Anything not
+# in here (a state T3 adds later, or a malformed/absent entry) maps to None —
+# "no usable status yet" — so the state machine waits rather than acting on
+# something it can't interpret.
 _THREAD_STATUS_BY_STRING: dict[str, ThreadStatus] = {
+    "completed": ThreadStatus.IDLE,
     "running": ThreadStatus.RUNNING,
-    "idle": ThreadStatus.IDLE,
-    "error": ThreadStatus.ERROR,
+    "in_progress": ThreadStatus.RUNNING,
+    "pending": ThreadStatus.RUNNING,
+    "queued": ThreadStatus.RUNNING,
+    "pendingInit": ThreadStatus.RUNNING,
+    "errored": ThreadStatus.ERROR,
 }
 
 # Action -> the terminal doorbell kind to ring. Only the terminal actions appear;
@@ -201,10 +211,13 @@ class Watcher:
 
     def _thread_status(self, thread_id: str) -> ThreadStatus | None:
         """This thread's liveness from the fleet snapshot, or ``None`` when the
-        thread is absent or its status string is one we don't recognise."""
+        thread is absent, has no turn yet, or its ``latestTurn.state`` is one we
+        don't recognise. Liveness is the state of the thread's latest turn (the
+        real snapshot shape), not a top-level ``status`` field."""
         for thread in self._t3.snapshot().get("threads", []):
             if thread.get("id") == thread_id:
-                return _THREAD_STATUS_BY_STRING.get(thread.get("status"))
+                latest_turn = thread.get("latestTurn") or {}
+                return _THREAD_STATUS_BY_STRING.get(latest_turn.get("state"))
         return None
 
     # ----------------------------------------------------------------- #

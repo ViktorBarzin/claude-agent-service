@@ -62,8 +62,21 @@ def _run(
     )
 
 
+# Map the tests' abstract liveness vocab to T3's REAL ``latestTurn.state`` strings
+# so call sites stay readable while the snapshot carries the true shape the
+# watcher parses (a finished turn is "completed", a failed one "errored",
+# "running" is itself real). Unknown values pass through verbatim.
+_REAL_STATE = {"idle": "completed", "error": "errored"}
+
+
 def _snapshot(thread_id: str, status: str) -> dict:
-    return {"threads": [{"id": thread_id, "status": status}]}
+    """A fleet snapshot with one thread whose latest turn is in ``status`` — real
+    shape ``threads[].latestTurn.state`` (not a top-level ``status`` field)."""
+    return {
+        "threads": [
+            {"id": thread_id, "latestTurn": {"state": _REAL_STATE.get(status, status)}}
+        ]
+    }
 
 
 def _labels(fake_tracker):
@@ -173,7 +186,7 @@ def test_close_success_posts_done_checklist(
 # --------------------------------------------------------------------------- #
 # ESCALATE_PREPUSH — agent stalled/errored before any push: hand to a human.
 # --------------------------------------------------------------------------- #
-@pytest.mark.parametrize("thread_state", ["error", "idle"])
+@pytest.mark.parametrize("thread_state", ["errored", "completed"])
 def test_escalate_prepush_relabels_and_notifies(
     fake_t3, fake_tracker, fake_ci, fake_notifier, make_issue, make_config, thread_state
 ):
@@ -290,6 +303,47 @@ def test_unknown_thread_status_waits(
     assert result.action.value == "wait"
     assert fake_tracker.closed == []
     assert fake_notifier.sent == []
+
+
+# --------------------------------------------------------------------------- #
+# Real T3 ``latestTurn.state`` strings map to the right liveness (contract guard
+# against the snapshot-shape drift that the previous adapter/fake masked).
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("state", ["running", "in_progress", "pending", "queued", "pendingInit"])
+def test_real_in_progress_states_keep_waiting(
+    fake_t3, fake_tracker, fake_ci, fake_notifier, make_issue, make_config, state
+):
+    issue = make_issue(number=7, repo="infra")
+    fake_t3.set_snapshot({"threads": [{"id": "thread-0", "latestTurn": {"state": state}}]})
+    result = _watcher(fake_t3, fake_tracker, fake_ci, fake_notifier).tick(
+        _run(issue, commit=None), make_config()
+    )
+    assert result.action.value == "wait"  # still working -> keep polling
+
+
+def test_real_errored_state_escalates_when_nothing_pushed(
+    fake_t3, fake_tracker, fake_ci, fake_notifier, make_issue, make_config
+):
+    # The real failure state is "errored" (not "error"); with nothing pushed it
+    # is a pre-push escalation, not a freeze.
+    issue = make_issue(number=7, repo="infra")
+    fake_t3.set_snapshot({"threads": [{"id": "thread-0", "latestTurn": {"state": "errored"}}]})
+    result = _watcher(fake_t3, fake_tracker, fake_ci, fake_notifier).tick(
+        _run(issue, commit=None), make_config()
+    )
+    assert result.action.value == "escalate_prepush"
+
+
+def test_thread_present_but_no_turn_yet_waits(
+    fake_t3, fake_tracker, fake_ci, fake_notifier, make_issue, make_config
+):
+    # A freshly-created thread has no latestTurn -> no usable status yet -> WAIT.
+    issue = make_issue(number=7, repo="infra")
+    fake_t3.set_snapshot({"threads": [{"id": "thread-0"}]})
+    result = _watcher(fake_t3, fake_tracker, fake_ci, fake_notifier).tick(
+        _run(issue, commit=None), make_config()
+    )
+    assert result.action.value == "wait"
 
 
 # --------------------------------------------------------------------------- #

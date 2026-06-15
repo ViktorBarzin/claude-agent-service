@@ -7,11 +7,10 @@ touches a real T3 server, tracker, or cluster. The suite walks the full
 dispatchability matrix — trust gate, allowlist, per-repo lock, blocked_by,
 kill switch — plus the priority ordering and the one-agent-per-repo invariant.
 
-Ordering contract under test: **higher ``priority`` first** (per the AFK module
-spec), with a deterministic tiebreaker so the output is stable regardless of
-input order. NOTE: ``Issue.priority``'s own docstring says "lower runs first";
-this module follows the explicit dispatch-policy spec instead — see the module
-docstring in ``dispatch_policy.py``.
+Ordering contract under test: **lower ``priority`` value first** (P0 before P1
+before P2 — most urgent wins), matching tracker conventions and
+``Issue.priority``'s own docstring, with a deterministic tiebreaker (ascending
+issue number) so the output is stable regardless of input order.
 """
 import itertools
 
@@ -183,13 +182,13 @@ def test_all_repos_in_flight_dispatches_nothing(make_issue, make_config):
 # same repo, even when both are eligible and the repo is not yet in-flight.
 # --------------------------------------------------------------------------- #
 def test_at_most_one_decision_per_repo(make_issue, make_config):
-    lo = make_issue(number=1, repo="infra", priority=1)
-    hi = make_issue(number=2, repo="infra", priority=9)
+    urgent = make_issue(number=1, repo="infra", priority=1)
+    minor = make_issue(number=2, repo="infra", priority=9)
     decisions = dispatch_policy.select_dispatchable(
-        [lo, hi], make_config(allowlist=["infra"]), set()
+        [urgent, minor], make_config(allowlist=["infra"]), set()
     )
     assert len(decisions) == 1
-    assert decisions[0].issue.number == 2  # the higher-priority one wins the slot
+    assert decisions[0].issue.number == 1  # most urgent (lowest value) wins the slot
 
 
 def test_one_decision_per_repo_across_many_repos(make_issue, make_config):
@@ -202,20 +201,21 @@ def test_one_decision_per_repo_across_many_repos(make_issue, make_config):
     decisions = dispatch_policy.select_dispatchable(
         issues, make_config(allowlist=["infra", "realestate-crawler"]), set()
     )
-    # One per repo, each the repo's highest-priority eligible issue.
-    assert _selected_set(decisions) == {11, 20}
+    # One per repo, each the repo's most urgent (lowest-value) eligible issue:
+    # infra -> #10 (p1 < p5); realestate-crawler -> #21 (p2 < p3).
+    assert _selected_set(decisions) == {10, 21}
     repos = [d.issue.repo for d in decisions]
     assert len(repos) == len(set(repos))  # no repo appears twice
 
 
 def test_ineligible_higher_priority_does_not_consume_repo_slot(make_issue, make_config):
-    """A higher-priority issue that is itself ineligible (e.g. blocked) must not
-    suppress a lower-priority *eligible* issue in the same repo — the slot goes
-    to the best ELIGIBLE candidate, not merely the highest-priority one."""
-    blocked_hi = make_issue(number=1, repo="infra", priority=9, blocked_by=[99])
-    ready_lo = make_issue(number=2, repo="infra", priority=1)
+    """A more-urgent issue that is itself ineligible (e.g. blocked) must not
+    suppress a less-urgent *eligible* issue in the same repo — the slot goes to
+    the best ELIGIBLE candidate, not merely the most urgent one."""
+    blocked_urgent = make_issue(number=1, repo="infra", priority=1, blocked_by=[99])
+    ready_minor = make_issue(number=2, repo="infra", priority=9)
     decisions = dispatch_policy.select_dispatchable(
-        [blocked_hi, ready_lo], make_config(allowlist=["infra"]), set()
+        [blocked_urgent, ready_minor], make_config(allowlist=["infra"]), set()
     )
     assert _selected_numbers(decisions) == [2]
 
@@ -249,18 +249,18 @@ def test_blocked_filters_only_blocked(make_issue, make_config):
 
 
 # --------------------------------------------------------------------------- #
-# Priority ordering — higher priority first, deterministic tiebreaker.
+# Priority ordering — lower priority value first, deterministic tiebreaker.
 # --------------------------------------------------------------------------- #
-def test_higher_priority_first(make_issue, make_config):
-    lo = make_issue(number=1, repo="infra", priority=1)
-    mid = make_issue(number=2, repo="realestate-crawler", priority=5)
-    hi = make_issue(number=3, repo="SparkyFitness", priority=9)
+def test_lower_priority_value_first(make_issue, make_config):
+    p1 = make_issue(number=1, repo="infra", priority=1)
+    p5 = make_issue(number=2, repo="realestate-crawler", priority=5)
+    p9 = make_issue(number=3, repo="SparkyFitness", priority=9)
     decisions = dispatch_policy.select_dispatchable(
-        [lo, hi, mid],
+        [p1, p9, p5],
         make_config(allowlist=["infra", "realestate-crawler", "SparkyFitness"]),
         set(),
     )
-    assert _selected_numbers(decisions) == [3, 2, 1]  # 9, 5, 1
+    assert _selected_numbers(decisions) == [1, 2, 3]  # priorities 1, 5, 9
 
 
 def test_ordering_independent_of_input_order(make_issue, make_config):
@@ -274,7 +274,7 @@ def test_ordering_independent_of_input_order(make_issue, make_config):
     ]
     allow = ["infra", "realestate-crawler", "SparkyFitness", "health"]
     config = make_config(allowlist=allow)
-    expected = [20, 30, 10, 40]  # priorities 8,5,2,1
+    expected = [40, 10, 30, 20]  # priorities 1,2,5,8 (most urgent first)
 
     for perm in itertools.permutations(base):
         issues = [make_issue(number=n, repo=r, priority=p) for (r, n, p) in perm]
@@ -305,7 +305,7 @@ def test_negative_and_zero_priorities_order_correctly(make_issue, make_config):
         make_config(allowlist=["infra", "realestate-crawler", "SparkyFitness"]),
         set(),
     )
-    assert _selected_numbers(decisions) == [3, 2, 1]  # 3 > 0 > -5
+    assert _selected_numbers(decisions) == [1, 2, 3]  # -5 < 0 < 3 (most urgent first)
 
 
 # --------------------------------------------------------------------------- #

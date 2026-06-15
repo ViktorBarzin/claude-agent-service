@@ -1,30 +1,34 @@
 """Tests for ``app.afk.t3_client`` — the in-cluster T3 dispatch/snapshot adapter.
 
-Everything here runs against an in-memory FAKE HTTP transport (``FakeHttp``);
-no test touches a real T3 server, GitHub/Forgejo, or the cluster. The fake
-records every request and replays staged responses, so the assertions pin the
-wire contract the control plane depends on:
+Everything runs against an in-memory FAKE HTTP transport; no test touches a real
+T3 server. These assertions pin the **real** orchestration wire contract
+(reverse-engineered from T3 v0.0.27 and verified live against t3-afk on
+2026-06-15) — deliberately strict, because the previous version of this adapter
+passed a laxer fake while 400-ing the real server. The fake therefore *rejects*
+a command without a ``type`` discriminator, so a regression to the old
+``{"command": "..."}` shape fails loudly here.
 
-  * ``dispatch`` issues exactly TWO POSTs to ``/api/orchestration/dispatch`` —
-    ``thread.create`` then ``thread.turn.start`` — carrying
-    ``modelSelection.instanceId == "claudeAgent"`` and ``runtimeMode ==
-    "full-access"``, with ``ISSUE_IMPLEMENTER_PREAMBLE`` PREPENDED to
-    ``message.text`` and the thread id from the first response threaded into the
-    second.
-  * each request carries the ``Authorization: Bearer <token>`` header from the
-    injected bearer provider (re-read per call, so token refresh is honoured).
-  * ``snapshot`` GETs ``/api/orchestration/snapshot`` and returns the parsed body.
+Pinned facts:
+  * the dispatch body is a BARE command keyed by ``type`` (not ``command``);
+  * the CLIENT mints ``threadId``/``commandId``/``messageId`` + ``createdAt``;
+    ``dispatch`` returns the id it generated (the server replies ``{sequence}``);
+  * a thread lives in a project, so ``dispatch`` ensures the repo's project
+    (snapshot GET → ``project.create`` iff absent) before ``thread.create``;
+  * ``ISSUE_IMPLEMENTER_PREAMBLE`` is prepended to the opening turn's text;
+  * ``send_turn`` posts a follow-up turn (no preamble) on an existing thread;
+  * every request carries ``Authorization: Bearer <token>``, re-read per call.
 """
 import pytest
 
 from app.afk import t3_client
 from app.afk.issue_implementer_prompt import ISSUE_IMPLEMENTER_PREAMBLE
 
+_MODEL = "claude-sonnet-4-6"
+
 
 # --------------------------------------------------------------------------- #
-# Fake HTTP transport — httpx-shaped (``post``/``get`` → response with
-# ``.json()`` + ``.raise_for_status()``), so the real client can hand the
-# adapter a plain ``httpx.Client`` while tests hand it this recorder.
+# Fake HTTP transport — httpx-shaped, but it ENFORCES the command envelope so a
+# malformed command (the old bug) raises instead of silently passing.
 # --------------------------------------------------------------------------- #
 class FakeResponse:
     def __init__(self, payload: dict, status_code: int = 200) -> None:
@@ -40,209 +44,222 @@ class FakeResponse:
 
 
 class FakeHttp:
-    """Records each POST/GET and replays queued responses in order.
+    """Records each POST/GET; GETs replay staged snapshots (default: no projects,
+    so ``dispatch`` creates one). POST bodies are validated as real commands."""
 
-    ``post`` pops from ``post_responses`` (FIFO); ``get`` pops from
-    ``get_responses``. Each recorded call captures the url, json body, and
-    headers so tests can assert the two-command dispatch shape and the bearer.
-    """
-
-    def __init__(
-        self,
-        post_responses: list[dict] | None = None,
-        get_responses: list[dict] | None = None,
-    ) -> None:
-        self.post_responses = list(post_responses or [])
+    def __init__(self, get_responses: list[dict] | None = None) -> None:
         self.get_responses = list(get_responses or [])
         self.posts: list[dict] = []
         self.gets: list[dict] = []
 
     def post(self, url: str, json: dict, headers: dict) -> FakeResponse:
+        assert isinstance(json.get("type"), str) and json["type"], (
+            f"command must carry a non-empty `type` discriminator, got {json!r}"
+        )
         self.posts.append({"url": url, "json": json, "headers": headers})
-        if not self.post_responses:
-            raise AssertionError("unexpected POST — no response staged")
-        return FakeResponse(self.post_responses.pop(0))
+        return FakeResponse({"sequence": len(self.posts)})  # the real server reply
 
     def get(self, url: str, headers: dict) -> FakeResponse:
         self.gets.append({"url": url, "headers": headers})
-        if not self.get_responses:
-            raise AssertionError("unexpected GET — no response staged")
-        return FakeResponse(self.get_responses.pop(0))
+        body = self.get_responses.pop(0) if self.get_responses else {"projects": []}
+        return FakeResponse(body)
+
+    # Convenience views over recorded POSTs, keyed by command type.
+    def commands(self, type_: str) -> list[dict]:
+        return [c["json"] for c in self.posts if c["json"]["type"] == type_]
 
 
-# Two thread.create / thread.turn.start replies the happy-path dispatch needs.
-_CREATE_REPLY = {"threadId": "thread-abc"}
-_TURN_REPLY = {"ok": True}
+def _ids():
+    """Deterministic id factory: id-1, id-2, … so tests can reason about minting."""
+    n = {"i": 0}
+
+    def f() -> str:
+        n["i"] += 1
+        return f"id-{n['i']}"
+
+    return f
 
 
-def _client(http: FakeHttp, *, base_url: str = "http://t3-afk:8080", token: str = "tok-1"):
+def _resolver(repo: str) -> t3_client.ProjectRef:
+    """Predictable repo -> project mapping for assertions."""
+    return t3_client.ProjectRef(f"proj-{repo}", f"/data/{repo}", repo)
+
+
+def _client(http: FakeHttp, *, base_url="http://t3-afk:8080", token="tok-1", **kw):
     return t3_client.T3Client(
         base_url=base_url,
         http=http,
         bearer_provider=lambda: token,
+        project_resolver=_resolver,
+        id_factory=kw.pop("id_factory", _ids()),
+        clock=kw.pop("clock", lambda: "2026-06-15T00:00:00+00:00"),
+        model=_MODEL,
     )
 
 
-def _dispatch(http: FakeHttp, **kw) -> str:
-    repo = kw.pop("repo", "infra")
-    issue = kw.pop("issue", 42)
-    prompt = kw.pop("prompt", "Do the thing.")
+def _dispatch(http: FakeHttp, *, repo="infra", issue=42, prompt="Do the thing.", **kw):
     return _client(http, **kw).dispatch(repo=repo, issue=issue, prompt=prompt)
 
 
 # --------------------------------------------------------------------------- #
-# dispatch — the two-POST shape.
+# dispatch — ensure-project, then create, then turn.
 # --------------------------------------------------------------------------- #
-def test_dispatch_issues_exactly_two_posts_to_dispatch_endpoint():
-    http = FakeHttp(post_responses=[_CREATE_REPLY, _TURN_REPLY])
+def test_dispatch_ensures_project_then_creates_thread_then_turn_when_project_absent():
+    http = FakeHttp(get_responses=[{"projects": []}])
     _dispatch(http)
-    assert len(http.posts) == 2
-    assert http.gets == []
+    # one snapshot GET (the existence check) + three POSTs in order.
+    assert len(http.gets) == 1
+    types = [c["json"]["type"] for c in http.posts]
+    assert types == ["project.create", "thread.create", "thread.turn.start"]
     for call in http.posts:
         assert call["url"] == "http://t3-afk:8080/api/orchestration/dispatch"
 
 
-def test_dispatch_first_command_is_thread_create():
-    http = FakeHttp(post_responses=[_CREATE_REPLY, _TURN_REPLY])
+def test_dispatch_skips_project_create_when_project_already_exists():
+    http = FakeHttp(get_responses=[{"projects": [{"id": "proj-infra"}]}])
+    _dispatch(http, repo="infra")
+    types = [c["json"]["type"] for c in http.posts]
+    assert types == ["thread.create", "thread.turn.start"]  # idempotent: no re-create
+
+
+def test_dispatch_uses_type_discriminator_not_command_string():
+    # Regression guard for the original bug: discriminator is `type`, and there is
+    # no legacy top-level `command` string key on any command.
+    http = FakeHttp()
     _dispatch(http)
-    assert http.posts[0]["json"]["command"] == "thread.create"
-
-
-def test_dispatch_second_command_is_thread_turn_start():
-    http = FakeHttp(post_responses=[_CREATE_REPLY, _TURN_REPLY])
-    _dispatch(http)
-    assert http.posts[1]["json"]["command"] == "thread.turn.start"
-
-
-def test_dispatch_returns_thread_id_from_create_response():
-    http = FakeHttp(post_responses=[{"threadId": "thread-xyz"}, _TURN_REPLY])
-    assert _dispatch(http) == "thread-xyz"
-
-
-def test_dispatch_threads_created_id_into_turn_start():
-    http = FakeHttp(post_responses=[{"threadId": "thread-xyz"}, _TURN_REPLY])
-    _dispatch(http)
-    # The second command must target the thread the first call created.
-    assert http.posts[1]["json"]["threadId"] == "thread-xyz"
+    for c in http.posts:
+        assert "type" in c["json"]
+        assert not isinstance(c["json"].get("command"), str)
 
 
 # --------------------------------------------------------------------------- #
-# dispatch — model selection / runtime envelope (the pilot-baked constants).
+# dispatch — thread.create real field set.
 # --------------------------------------------------------------------------- #
-def test_dispatch_uses_claude_agent_instance_and_full_access_runtime():
-    http = FakeHttp(post_responses=[_CREATE_REPLY, _TURN_REPLY])
-    _dispatch(http)
-    create_body = http.posts[0]["json"]
-    assert create_body["modelSelection"]["instanceId"] == "claudeAgent"
-    assert create_body["runtimeMode"] == "full-access"
+def test_thread_create_carries_real_required_fields():
+    http = FakeHttp()
+    _dispatch(http, repo="infra")
+    create = http.commands("thread.create")[0]
+    assert create["projectId"] == "proj-infra"
+    assert create["modelSelection"] == {"instanceId": "claudeAgent", "model": _MODEL}
+    assert create["runtimeMode"] == "full-access"
+    assert create["interactionMode"] == "default"
+    # NullOr fields are present (not omitted) — the schema requires the keys.
+    assert create["branch"] is None
+    assert create["worktreePath"] is None
+    # client-minted identity + timestamp.
+    assert isinstance(create["commandId"], str) and create["commandId"]
+    assert isinstance(create["threadId"], str) and create["threadId"]
+    assert create["createdAt"] == "2026-06-15T00:00:00+00:00"
 
 
-def test_dispatch_create_carries_repo_and_issue():
-    http = FakeHttp(post_responses=[_CREATE_REPLY, _TURN_REPLY])
-    _dispatch(http, repo="claude-agent-service", issue=7)
-    create_body = http.posts[0]["json"]
-    assert create_body["repo"] == "claude-agent-service"
-    assert create_body["issue"] == 7
+def test_dispatch_returns_client_minted_thread_id_not_a_server_value():
+    http = FakeHttp()
+    returned = _dispatch(http)
+    create = http.commands("thread.create")[0]
+    turn = http.commands("thread.turn.start")[0]
+    # The returned id is the one WE put on thread.create (server only sends {sequence}).
+    assert returned == create["threadId"] == turn["threadId"]
 
 
 # --------------------------------------------------------------------------- #
-# dispatch — the preamble PREPEND (behaviour injection).
+# dispatch — thread.turn.start real message shape + preamble.
 # --------------------------------------------------------------------------- #
-def test_dispatch_prepends_issue_implementer_preamble_to_message_text():
-    http = FakeHttp(post_responses=[_CREATE_REPLY, _TURN_REPLY])
+def test_turn_message_has_real_shape_and_prepends_preamble():
+    http = FakeHttp()
     _dispatch(http, prompt="Implement issue 42 body here.")
-    text = http.posts[1]["json"]["message"]["text"]
-    assert text == ISSUE_IMPLEMENTER_PREAMBLE + "Implement issue 42 body here."
+    turn = http.commands("thread.turn.start")[0]
+    msg = turn["message"]
+    assert msg["role"] == "user"
+    assert isinstance(msg["messageId"], str) and msg["messageId"]
+    assert msg["attachments"] == []
+    assert msg["text"] == ISSUE_IMPLEMENTER_PREAMBLE + "Implement issue 42 body here."
+    assert turn["runtimeMode"] == "full-access"
+    assert turn["interactionMode"] == "default"
 
 
-def test_dispatch_preamble_comes_strictly_before_the_prompt():
-    http = FakeHttp(post_responses=[_CREATE_REPLY, _TURN_REPLY])
-    _dispatch(http, prompt="UNIQUE-PROMPT-MARKER")
-    text = http.posts[1]["json"]["message"]["text"]
-    assert text.startswith(ISSUE_IMPLEMENTER_PREAMBLE)
-    assert text.index(ISSUE_IMPLEMENTER_PREAMBLE) < text.index("UNIQUE-PROMPT-MARKER")
-    # The raw prompt is preserved verbatim after the preamble.
-    assert text.endswith("UNIQUE-PROMPT-MARKER")
-
-
-def test_dispatch_does_not_prepend_preamble_to_create_command():
-    # The preamble belongs only on the turn message, not the thread.create call.
-    http = FakeHttp(post_responses=[_CREATE_REPLY, _TURN_REPLY])
+def test_preamble_only_on_turn_not_on_create():
+    http = FakeHttp()
     _dispatch(http)
-    assert "message" not in http.posts[0]["json"]
+    assert "message" not in http.commands("thread.create")[0]
 
 
 # --------------------------------------------------------------------------- #
-# Auth — bearer header, read from the injected provider each call.
+# send_turn — follow-up turn on an existing thread (multi-turn), no preamble.
 # --------------------------------------------------------------------------- #
-def test_dispatch_sends_bearer_on_both_posts():
-    http = FakeHttp(post_responses=[_CREATE_REPLY, _TURN_REPLY])
+def test_send_turn_posts_single_turn_to_existing_thread_without_preamble():
+    http = FakeHttp()
+    _client(http).send_turn("thread-xyz", "Just this follow-up.")
+    assert [c["json"]["type"] for c in http.posts] == ["thread.turn.start"]
+    turn = http.commands("thread.turn.start")[0]
+    assert turn["threadId"] == "thread-xyz"
+    assert turn["message"]["text"] == "Just this follow-up."  # verbatim, no preamble
+    assert http.gets == []  # no project work for a follow-up
+
+
+# --------------------------------------------------------------------------- #
+# Auth — bearer on every request, re-read per call.
+# --------------------------------------------------------------------------- #
+def test_every_request_sends_bearer():
+    http = FakeHttp()
     _dispatch(http, token="secret-token")
     for call in http.posts:
         assert call["headers"]["Authorization"] == "Bearer secret-token"
+    for call in http.gets:
+        assert call["headers"]["Authorization"] == "Bearer secret-token"
 
 
-def test_bearer_provider_is_called_per_request_so_refresh_is_honoured():
-    # A rotating provider proves the token isn't captured once at construction
-    # (T3's orchestration token expires hourly and must be re-read).
-    tokens = iter(["tok-A", "tok-B", "tok-C"])
-    http = FakeHttp(post_responses=[_CREATE_REPLY, _TURN_REPLY])
+def test_bearer_is_reread_per_request_so_rotation_is_honoured():
+    tokens = iter(["tok-A", "tok-B", "tok-C", "tok-D", "tok-E"])
+    http = FakeHttp()
     client = t3_client.T3Client(
         base_url="http://t3-afk:8080",
         http=http,
         bearer_provider=lambda: next(tokens),
+        project_resolver=_resolver,
+        id_factory=_ids(),
+        clock=lambda: "t",
     )
     client.dispatch(repo="infra", issue=1, prompt="x")
-    assert http.posts[0]["headers"]["Authorization"] == "Bearer tok-A"
-    assert http.posts[1]["headers"]["Authorization"] == "Bearer tok-B"
+    # GET(ensure) then POST(project.create) then POST(create) then POST(turn) —
+    # each pulled a fresh token in call order.
+    assert http.gets[0]["headers"]["Authorization"] == "Bearer tok-A"
+    assert http.posts[0]["headers"]["Authorization"] == "Bearer tok-B"
+    assert http.posts[1]["headers"]["Authorization"] == "Bearer tok-C"
+    assert http.posts[2]["headers"]["Authorization"] == "Bearer tok-D"
 
 
 # --------------------------------------------------------------------------- #
 # snapshot — GET + parse.
 # --------------------------------------------------------------------------- #
-def test_snapshot_gets_snapshot_endpoint_and_returns_parsed_body():
-    fleet = {"threads": [{"id": "thread-abc", "status": "running"}]}
+def test_snapshot_gets_endpoint_and_returns_parsed_body():
+    fleet = {"threads": [{"id": "t1", "latestTurn": {"state": "running"}}], "projects": []}
     http = FakeHttp(get_responses=[fleet])
     result = _client(http).snapshot()
     assert result == fleet
-    assert len(http.gets) == 1
     assert http.gets[0]["url"] == "http://t3-afk:8080/api/orchestration/snapshot"
     assert http.posts == []
 
 
-def test_snapshot_sends_bearer():
-    http = FakeHttp(get_responses=[{"threads": []}])
-    _client(http, token="snap-token").snapshot()
-    assert http.gets[0]["headers"]["Authorization"] == "Bearer snap-token"
-
-
 # --------------------------------------------------------------------------- #
-# base_url handling — a trailing slash must not produce a double slash.
+# base_url normalisation + error surfacing.
 # --------------------------------------------------------------------------- #
 def test_trailing_slash_in_base_url_is_normalised():
-    http = FakeHttp(
-        post_responses=[_CREATE_REPLY, _TURN_REPLY],
-        get_responses=[{"threads": []}],
-    )
+    http = FakeHttp()
     client = _client(http, base_url="http://t3-afk:8080/")
     client.dispatch(repo="infra", issue=1, prompt="x")
-    client.snapshot()
     assert http.posts[0]["url"] == "http://t3-afk:8080/api/orchestration/dispatch"
     assert http.gets[0]["url"] == "http://t3-afk:8080/api/orchestration/snapshot"
 
 
-# --------------------------------------------------------------------------- #
-# Error surfacing — a non-2xx response must raise, not be swallowed.
-# --------------------------------------------------------------------------- #
-def test_dispatch_raises_when_a_post_returns_an_error_status():
+def test_dispatch_raises_and_short_circuits_when_a_post_errors():
     class ErroringHttp(FakeHttp):
         def post(self, url: str, json: dict, headers: dict) -> FakeResponse:
-            self.posts.append({"url": url, "json": json, "headers": headers})
+            super().post(url, json, headers)  # validates + records
             return FakeResponse({}, status_code=500)
 
-    http = ErroringHttp()
+    http = ErroringHttp(get_responses=[{"projects": [{"id": "proj-infra"}]}])
     with pytest.raises(RuntimeError):
-        _dispatch(http)
-    # It failed on the FIRST call — never blindly fired thread.turn.start after
-    # a failed thread.create.
-    assert len(http.posts) == 1
+        _dispatch(http, repo="infra")
+    # Project already existed, so the FIRST post is thread.create — and it failed,
+    # so thread.turn.start never fired.
+    assert [c["json"]["type"] for c in http.posts] == ["thread.create"]

@@ -176,14 +176,15 @@ def test_custom_in_progress_label_drives_the_lock(fake_tracker, fake_t3, make_is
 
 # --------------------------------------------------------------------------- #
 # One dispatch per repo per tick (the policy's one-agent-per-repo invariant,
-# observed through the poller): highest-priority eligible issue wins the slot.
+# observed through the poller): the most urgent (lowest-value) eligible issue
+# wins the slot.
 # --------------------------------------------------------------------------- #
 def test_one_dispatch_per_repo_per_tick(fake_tracker, fake_t3, make_issue):
     fake_tracker.seed(
         "infra",
         [
-            make_issue(number=1, repo="infra", priority=1),
-            make_issue(number=2, repo="infra", priority=9),  # highest priority
+            make_issue(number=1, repo="infra", priority=1),  # most urgent (lowest value)
+            make_issue(number=2, repo="infra", priority=9),
             make_issue(number=3, repo="infra", priority=5),
         ],
     )
@@ -191,8 +192,8 @@ def test_one_dispatch_per_repo_per_tick(fake_tracker, fake_t3, make_issue):
 
     _poller(fake_tracker, fake_t3).run_once(config)
 
-    assert _dispatched_pairs(fake_t3) == {("infra", 2)}
-    assert _added_in_progress(fake_tracker) == {("infra", 2)}
+    assert _dispatched_pairs(fake_t3) == {("infra", 1)}
+    assert _added_in_progress(fake_tracker) == {("infra", 1)}
 
 
 # --------------------------------------------------------------------------- #

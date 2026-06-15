@@ -23,18 +23,19 @@ What it encapsulates (the dispatch predicate from the AFK pipeline design doc):
     the issue is skipped.
   * **One-agent-per-repo within the batch** — because a repo hosts only one
     in-flight agent, a single call returns at most ONE decision per repo: the
-    highest-priority eligible issue in that repo wins the slot. (A higher-priority
-    issue that is itself ineligible does not consume the slot — the best
-    *eligible* candidate does.)
+    most-urgent eligible issue in that repo wins the slot. (A more-urgent issue
+    that is itself ineligible does not consume the slot — the best *eligible*
+    candidate does.)
   * **Priority ordering** — the surviving per-repo winners are returned
-    highest-``priority``-first, with a deterministic tiebreaker (ascending issue
-    number) so the output is a total, stable order independent of input order.
+    lowest-``priority``-value-first (P0 before P1 before P2), with a deterministic
+    tiebreaker (ascending issue number) so the output is a total, stable order
+    independent of input order.
 
-PRIORITY DIRECTION — note the deliberate divergence: ``Issue.priority``'s
-docstring in ``types`` says "lower runs first", but this module follows the
-explicit dispatch-policy specification, which orders **higher priority first**.
-The ordering lives here (the one place that consumes ``priority`` for dispatch),
-so this module is the source of truth for the direction.
+PRIORITY DIRECTION — lower ``Issue.priority`` runs first, matching tracker
+conventions (P0/P1 are more urgent than P2) and ``Issue.priority``'s own
+docstring in ``types``. The ordering lives here (the one place that consumes
+``priority`` for dispatch), so this module is the source of truth for the
+direction.
 
 Pure: it never mutates its inputs — the caller's issue list, the config, and the
 ``in_flight_repos`` set are all left exactly as passed.
@@ -51,7 +52,8 @@ def select_dispatchable(
 
     Empty when the kill switch is on, the allowlist excludes everything, or no
     issue clears every gate. At most one decision per repo; ordered
-    highest-priority-first, ties broken by ascending issue number.
+    lowest-priority-value-first (most urgent), ties broken by ascending issue
+    number.
     """
     # Kill switch: master off-ramp, evaluated before any per-issue work.
     if config.kill_switch:
@@ -73,7 +75,7 @@ def select_dispatchable(
     for issue in sorted(eligible, key=_dispatch_sort_key):
         best_per_repo.setdefault(issue.repo, issue)
 
-    # Final order: the per-repo winners, highest priority first (total + stable).
+    # Final order: the per-repo winners, most urgent first (total + stable).
     winners = sorted(best_per_repo.values(), key=_dispatch_sort_key)
     return [DispatchDecision(issue=issue, reason=_reason(issue)) for issue in winners]
 
@@ -101,11 +103,10 @@ def _is_eligible(
 
 
 def _dispatch_sort_key(issue: Issue) -> tuple[int, int]:
-    """Sort key giving a total, deterministic order: highest ``priority`` first
-    (negated so a plain ascending sort puts it on top), then lowest issue number
-    as the tiebreaker so equal-priority issues never depend on input/iteration
-    order."""
-    return (-issue.priority, issue.number)
+    """Sort key giving a total, deterministic order: lowest ``priority`` value
+    first (P0 before P1 — most urgent wins), then lowest issue number as the
+    tiebreaker so equal-priority issues never depend on input/iteration order."""
+    return (issue.priority, issue.number)
 
 
 def _reason(issue: Issue) -> str:
