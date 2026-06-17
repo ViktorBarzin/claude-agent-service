@@ -171,3 +171,79 @@ async def test_conversational_returns_503_on_failure(auth_header):
             )
     assert r.status_code == 503
     assert r.json()["error"] == "execution failed"
+
+
+# --------------------------------------------------------------------------- #
+# streaming helpers (OpenAI-compatible token relay for the realtime voice agent)
+# --------------------------------------------------------------------------- #
+from collections import namedtuple  # noqa: E402
+
+_Msg = namedtuple("_Msg", "role content")
+
+
+def test_stream_argv_uses_stream_json_and_is_stateless():
+    argv = conversational.stream_argv("hello", "sonnet")
+    assert argv[:2] == ["claude", "-p"]
+    assert "--agent" in argv and "conversational" in argv
+    assert "stream-json" in argv
+    assert "--include-partial-messages" in argv
+    assert "--verbose" in argv
+    assert "--model" in argv and "sonnet" in argv
+    assert argv[-1] == "hello"
+    # stateless + no tools
+    assert "--resume" not in argv and "--session-id" not in argv
+    assert "--dangerously-skip-permissions" not in argv
+
+
+def test_delta_text_extracts_content_block_delta():
+    line = json.dumps({
+        "type": "stream_event",
+        "event": {"type": "content_block_delta",
+                  "delta": {"type": "text_delta", "text": "Слон"}},
+    })
+    assert conversational.delta_text(line) == "Слон"
+
+
+def test_delta_text_ignores_non_text_events():
+    for ev in [
+        {"type": "system"},
+        {"type": "stream_event", "event": {"type": "message_start"}},
+        {"type": "stream_event", "event": {"type": "content_block_delta",
+            "delta": {"type": "input_json_delta", "partial_json": "{"}}},
+        {"type": "result"},
+    ]:
+        assert conversational.delta_text(json.dumps(ev)) is None
+    assert conversational.delta_text("") is None
+    assert conversational.delta_text("not json") is None
+
+
+def test_openai_chunk_valid_sse_and_keeps_cyrillic():
+    s = conversational.openai_chunk("chatcmpl-x", "sonnet", 123, content="две")
+    assert s.startswith("data: ") and s.endswith("\n\n")
+    payload = json.loads(s[len("data: "):].strip())
+    assert payload["object"] == "chat.completion.chunk"
+    assert payload["choices"][0]["delta"]["content"] == "две"
+    assert payload["choices"][0]["finish_reason"] is None
+    assert "две" in s  # not unicode-escaped
+
+
+def test_openai_chunk_role_and_finish():
+    role = conversational.openai_chunk("id", "m", 1, role="assistant")
+    assert json.loads(role[6:].strip())["choices"][0]["delta"] == {"role": "assistant"}
+    stop = conversational.openai_chunk("id", "m", 1, finish_reason="stop")
+    c = json.loads(stop[6:].strip())["choices"][0]
+    assert c["finish_reason"] == "stop" and c["delta"] == {}
+
+
+def test_synthesise_chat_prompt_keeps_assistant_turns():
+    msgs = [
+        _Msg("system", "Be brief."),
+        _Msg("user", "Здравей"),
+        _Msg("assistant", "Здравей! Как си?"),
+        _Msg("user", "Добре, ти?"),
+    ]
+    p = conversational.synthesise_chat_prompt(msgs)
+    assert "Be brief." in p
+    assert "User: Здравей" in p
+    assert "Assistant: Здравей! Как си?" in p
+    assert p.strip().endswith("User: Добре, ти?")

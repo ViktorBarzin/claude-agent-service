@@ -98,14 +98,15 @@ async def test_chat_completions_happy_path(auth_header):
 
 
 @pytest.mark.asyncio
-async def test_chat_completions_rejects_streaming(auth_header):
-    """stream=true is not supported and must 400 with a clear message."""
+async def test_chat_completions_streaming_rejects_unsupported_model(auth_header):
+    """Streaming is supported now; model validation still runs first, so an
+    unsupported model 400s before any CLI is spawned."""
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.post(
             "/v1/chat/completions",
             json={
-                "model": "haiku",
+                "model": "gpt-4",
                 "messages": [{"role": "user", "content": "hi"}],
                 "stream": True,
             },
@@ -113,7 +114,7 @@ async def test_chat_completions_rejects_streaming(auth_header):
         )
     assert response.status_code == 400
     body = response.json()
-    assert "streaming not supported" in json.dumps(body).lower()
+    assert "unsupported model" in json.dumps(body).lower()
 
 
 @pytest.mark.asyncio
@@ -370,3 +371,58 @@ async def test_chat_completions_response_model_echoes_default_when_missing(auth_
     )
     assert status == 200
     assert body["model"] == "sonnet"
+
+
+def _delta_line(text: str) -> str:
+    return json.dumps({
+        "type": "stream_event",
+        "event": {"type": "content_block_delta",
+                  "delta": {"type": "text_delta", "text": text}},
+    })
+
+
+@pytest.mark.asyncio
+async def test_chat_completions_streaming_relays_token_sse(auth_header):
+    """stream=true relays CLI stream-json token deltas as OpenAI SSE chunks."""
+    cli_output = "\n".join([
+        json.dumps({"type": "system"}),
+        json.dumps({"type": "stream_event", "event": {"type": "message_start"}}),
+        _delta_line("Две"),
+        _delta_line(" точки."),
+        json.dumps({"type": "result", "subtype": "success"}),
+    ]).encode()
+    mock_proc = _mock_subprocess_returning(cli_output, returncode=0)
+
+    with patch("app.main.asyncio.create_subprocess_exec", return_value=mock_proc):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "sonnet",
+                    "stream": True,
+                    "messages": [{"role": "user", "content": "Колко е?"}],
+                },
+                headers=auth_header,
+            )
+
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"].startswith("text/event-stream")
+    body = response.text
+    assert "chat.completion.chunk" in body
+    assert body.rstrip().endswith("data: [DONE]")
+
+    # Reassemble the streamed assistant content from the delta chunks.
+    content = ""
+    saw_role = False
+    for line in body.splitlines():
+        if not line.startswith("data: ") or line.strip() == "data: [DONE]":
+            continue
+        payload = json.loads(line[len("data: "):])
+        assert payload["object"] == "chat.completion.chunk"
+        delta = payload["choices"][0]["delta"]
+        if delta.get("role") == "assistant":
+            saw_role = True
+        content += delta.get("content", "")
+    assert saw_role
+    assert content == "Две точки."

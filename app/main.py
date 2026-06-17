@@ -2,6 +2,8 @@ import asyncio
 import hmac
 import json
 import os
+import shutil
+import tempfile
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -10,7 +12,7 @@ from subprocess import PIPE
 from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException, Header
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from app import conversational
@@ -446,9 +448,6 @@ async def chat_completions(
 ):
     verify_token(authorization)
 
-    if request.stream:
-        raise HTTPException(status_code=400, detail="streaming not supported")
-
     model = request.model if request.model is not None else DEFAULT_MODEL
     if model not in SUPPORTED_MODELS:
         return JSONResponse(
@@ -458,6 +457,64 @@ async def chat_completions(
                 "supported": sorted(SUPPORTED_MODELS),
             },
         )
+
+    # Streaming path (the realtime voice agent / Pipecat). Token-level deltas via
+    # the conversational (no-tools) agent in stream-json mode, relayed as
+    # OpenAI chat.completion.chunk SSE. Stateless: the full history is in the
+    # prompt (the client re-sends it each turn). No workspace clone — the
+    # conversational agent reads no files.
+    if request.stream:
+        if not _reserve_queue_slot():
+            return JSONResponse(
+                status_code=503,
+                content={"error": "execution failed", "detail": "queue full"},
+            )
+        prompt = conversational.synthesise_chat_prompt(request.messages)
+        completion_id = "chatcmpl-" + uuid.uuid4().hex[:24]
+        created = int(time.time())
+        spawn = asyncio.create_subprocess_exec  # bound alias (keeps subprocess use tidy)
+
+        async def event_stream():
+            workspace = tempfile.mkdtemp(prefix="conv-stream-")
+            proc = None
+            try:
+                async with _execution_slot():
+                    proc = await spawn(
+                        *conversational.stream_argv(prompt, model),
+                        cwd=workspace, stdout=PIPE, stderr=PIPE,
+                    )
+                    assert proc.stdout is not None
+                    yield conversational.openai_chunk(
+                        completion_id, model, created, role="assistant"
+                    )
+                    try:
+                        async with asyncio.timeout(
+                            conversational.CONVERSATIONAL_TIMEOUT_SECONDS
+                        ):
+                            async for raw in proc.stdout:
+                                text = conversational.delta_text(
+                                    raw.decode(errors="replace")
+                                )
+                                if text:
+                                    yield conversational.openai_chunk(
+                                        completion_id, model, created, content=text
+                                    )
+                    except asyncio.TimeoutError:
+                        pass  # wedged turn — close the stream cleanly
+                    yield conversational.openai_chunk(
+                        completion_id, model, created, finish_reason="stop"
+                    )
+                    yield "data: [DONE]\n\n"
+            finally:
+                if proc is not None and proc.returncode is None:
+                    try:
+                        proc.kill()
+                        await proc.wait()
+                    except ProcessLookupError:
+                        pass
+                shutil.rmtree(workspace, ignore_errors=True)
+
+        return StreamingResponse(event_stream(), media_type="text/event-stream")
 
     prompt = _synthesise_prompt(request.messages)
 
