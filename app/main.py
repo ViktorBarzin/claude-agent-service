@@ -13,6 +13,8 @@ from fastapi import FastAPI, HTTPException, Header
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from app import conversational
+
 app = FastAPI(title="Claude Agent Service")
 
 API_TOKEN = os.environ.get("API_BEARER_TOKEN", "")
@@ -102,6 +104,15 @@ class ChatCompletionsRequest(BaseModel):
     stream: bool = False
     # Tolerate (and ignore) other OpenAI fields rather than 422-ing on them.
     model_config = {"extra": "allow"}
+
+
+class ConversationalRequest(BaseModel):
+    # The portal-assistant gateway owns the conversation; it hands us a stable
+    # session id (for Claude --resume) plus the next user message. Model is
+    # selectable per request, same as the OpenAI-compat path.
+    session_id: str
+    message: str
+    model: str | None = None
 
 
 def verify_token(authorization: str | None):
@@ -510,3 +521,56 @@ async def chat_completions(
             "total_tokens": 0,
         },
     }
+
+
+@app.post("/v1/conversational")
+async def conversational_turn(
+    request: ConversationalRequest,
+    authorization: str | None = Header(default=None),
+):
+    """Lean, multi-turn conversational Brain for the portal-assistant gateway.
+
+    Drives a no-tools conversational agent with per-conversation --resume — no
+    workspace clone, no tools (see portal-assistant ADR-0002). Returns the
+    assistant's reply text keyed to the caller's session id.
+    """
+    verify_token(authorization)
+
+    model = request.model if request.model is not None else DEFAULT_MODEL
+    if model not in SUPPORTED_MODELS:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "unsupported model", "supported": sorted(SUPPORTED_MODELS)},
+        )
+
+    if not _reserve_queue_slot():
+        return JSONResponse(
+            status_code=503,
+            content={"error": "execution failed", "detail": "queue full"},
+        )
+
+    try:
+        async with _execution_slot():
+            result = await asyncio.wait_for(
+                conversational.run_turn(request.session_id, request.message, model),
+                timeout=conversational.CONVERSATIONAL_TIMEOUT_SECONDS,
+            )
+    except asyncio.TimeoutError:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "execution failed", "detail": "agent timed out"},
+        )
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse(
+            status_code=503,
+            content={"error": "execution failed", "detail": _one_line(str(exc))},
+        )
+
+    if result["exit_code"] != 0:
+        detail = _one_line(result.get("stderr") or "") or f"exit {result['exit_code']}"
+        return JSONResponse(
+            status_code=503,
+            content={"error": "execution failed", "detail": detail},
+        )
+
+    return {"session_id": request.session_id, "reply": result["reply"]}
