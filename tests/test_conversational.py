@@ -30,6 +30,10 @@ def test_conversational_argv_new_session():
     assert "--dangerously-skip-permissions" not in argv
     assert argv[argv.index("--model") + 1] == "sonnet"
     assert argv[argv.index("--output-format") + 1] == "json"
+    # latency: trims project CLAUDE.md/MCP + dynamic system-prompt sections off
+    # the no-tools voice turn (~45k -> ~23k input tokens, ~1.3s faster TTFT)
+    assert argv[argv.index("--setting-sources") + 1] == "user"
+    assert "--exclude-dynamic-system-prompt-sections" in argv
     assert argv[-1] == "Hi there"
 
 
@@ -189,6 +193,9 @@ def test_stream_argv_uses_stream_json_and_is_stateless():
     assert "--include-partial-messages" in argv
     assert "--verbose" in argv
     assert "--model" in argv and "sonnet" in argv
+    # latency: same lean-context trim as the gateway path
+    assert argv[argv.index("--setting-sources") + 1] == "user"
+    assert "--exclude-dynamic-system-prompt-sections" in argv
     assert argv[-1] == "hello"
     # stateless + no tools
     assert "--resume" not in argv and "--session-id" not in argv

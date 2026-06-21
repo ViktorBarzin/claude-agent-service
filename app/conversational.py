@@ -16,6 +16,19 @@ CONVERSATIONAL_TIMEOUT_SECONDS = int(
     os.environ.get("CONVERSATIONAL_TIMEOUT_SECONDS", "120")
 )
 
+# Latency: the conversational agent is no-tools (ADR-0002), so the CLI's default
+# project context — this repo's CLAUDE.md, the MCP server configs, local settings
+# — plus the dynamic system-prompt sections are pure overhead on a voice turn.
+# Measured 2026-06-21: the default load is ~45k input tokens/turn -> ~3.4s TTFT;
+# restricting settings to `user` and excluding the dynamic sections more than
+# halves the context (~23k) and cuts TTFT to ~2.1s (~1.3s/turn faster) with no
+# change to the reply. Applies to BOTH the gateway (json) and realtime (stream)
+# paths, since both run the same no-tools conversational turn.
+_LEAN_CONTEXT_FLAGS = [
+    "--setting-sources", "user",
+    "--exclude-dynamic-system-prompt-sections",
+]
+
 # Session ids the Claude CLI has already opened in THIS process, so a follow-up
 # turn resumes instead of re-opening. In-memory + single-replica: a pod restart
 # clears this AND the CLI's emptyDir session state together, so they stay in sync.
@@ -42,6 +55,7 @@ def conversational_argv(
         "--agent", CONVERSATIONAL_AGENT,
         "--output-format", "json",
         "--model", model,
+        *_LEAN_CONTEXT_FLAGS,
     ]
     argv += ["--resume", session_id] if resume else ["--session-id", session_id]
     argv.append(message)
@@ -123,6 +137,7 @@ def stream_argv(prompt: str, model: str) -> list[str]:
         "--output-format", "stream-json",
         "--include-partial-messages",
         "--verbose",
+        *_LEAN_CONTEXT_FLAGS,
         prompt,
     ]
 
