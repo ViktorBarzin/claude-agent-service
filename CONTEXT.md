@@ -2,9 +2,9 @@
 
 In-cluster FastAPI wrapper that runs the Claude CLI headlessly for other
 services (issue automation, recruiter triage, nextcloud todos, …). This
-glossary covers the **breakglass** capability layered on top of it; the
-existing job-runner concepts (Job, Execute, OpenAI-compat) are documented in
-the code.
+glossary covers two capabilities layered on top of it — **breakglass** and the
+**fixer** — while the existing job-runner concepts (Job, Execute,
+OpenAI-compat) are documented in the code.
 
 ## Language
 
@@ -53,6 +53,71 @@ reset never destroys the evidence of why the devvm was wedged.
 _Avoid_: "logs", "snapshot" (this is a point-in-time diagnostic dump, not a
 disk snapshot).
 
+### Fixer
+
+Design record: `docs/2026-08-25-forgejo-fixer-design.md`.
+
+**Fixer**:
+The capability that turns a `broken` issue on Forgejo `viktor/infra` into a
+diagnosed, repaired, deployed change without a human in the loop. Scoped to the
+cluster and the `infra` repo.
+_Avoid_: "the AFK loop" (that is the parked, T3-executed pipeline this reuses
+parts of), "the issue-responder" (that is the agent definition the fixer runs,
+not the capability).
+
+**Fixer run**:
+One `/execute` job dispatched for one issue. Runs are **one-shot**: a run holds
+no session, so anything a successor needs is written to the issue.
+_Avoid_: "session", "thread" (both imply continuity a run does not have).
+
+**`broken`** / **`change`**:
+The two labels a person — or a person's agent — applies. **`broken`** means
+something is not working right now and **dispatches a fixer**. **`change`** is a
+proposal with nothing currently failing, and dispatches nothing.
+_Avoid_: `user-report` / `feature-request` (the retired GitHub vocabulary; they
+name the reporter or the wish rather than the observed state).
+
+**Follow-up issue**:
+The mechanism for continuing across one-shot runs: a run that cannot fix the
+whole root cause files a new `broken` issue naming what remains, which
+dispatches the next run.
+_Avoid_: "retry" (a follow-up is new work with a new root cause, not the same
+work again).
+
+**Chain**:
+A root issue plus the follow-up issues descended from it. Each issue records its
+chain parent, so the whole path is readable from the tracker.
+
+**Per-repo lock**:
+The invariant that at most one fixer run holds a repo at a time. With `infra` as
+the only enrolled repo, it is what bounds burn rate — there are no budget, time,
+or depth caps.
+_Avoid_: "rate limit", "quota" (nothing is counted; a second issue simply
+queues).
+
+**Fix forward**:
+The response to a red pipeline on a commit the fixer pushed: dispatch another
+corrective run rather than reverting. Chosen over revert-on-red.
+_Avoid_: "rollback", "revert" (the fixer does not undo its own commit).
+
+**Freeze**:
+The terminal state when fix-forward cannot continue: the broken commit is left
+in place, the issue is labelled `needs-human` and assigned to `viktor`, and the
+doorbell fires.
+_Avoid_: "fail" (the run reached a definite state and handed over deliberately).
+
+**Brake**:
+The two human stops. The **`paused`** label stops the next dispatch for one
+issue, instantly and without a deploy. **`AFK_KILL_SWITCH`** stops all dispatch
+globally via a committed config change. Neither cancels a run already in flight.
+_Avoid_: "kill switch" for the label (that name belongs to the global one).
+
+**Doorbell**:
+The terminal-state alert (`done` / `needs-human` / `frozen`) sent to ntfy. The
+reporter separately receives Forgejo's own email on every comment.
+_Avoid_: "notification" unqualified — the reporter's email and the owner's
+doorbell are different channels with different audiences.
+
 ## Relationships
 
 - The **Breakglass** UI is served by an in-cluster pod and reaches the
@@ -64,6 +129,18 @@ disk snapshot).
   warm variant that does not.
 - **Breakglass** covers only the **Warm case**; the **Cold case** is a
   separate, out-of-scope recovery path.
+- A **`broken`** label dispatches one **Fixer run**; a **`change`** label
+  dispatches nothing.
+- A **Fixer run** that cannot finish the root cause files a **Follow-up issue**,
+  extending the **Chain**; a run that pushes a commit CI rejects goes to **Fix
+  forward**, and when that cannot continue it ends in **Freeze**.
+- The **Per-repo lock** admits one **Fixer run** at a time; a **Brake** stops
+  the next dispatch but never one in flight.
+- **Freeze** and a successful close both fire the **Doorbell**; the reporter
+  hears about every comment by email regardless.
+- The **Fixer** and the **Breakglass agent** are deliberately separate: the
+  fixer repairs the cluster from inside it, the breakglass repairs the devvm
+  from outside. Neither is a fallback for the other.
 
 ## Example dialogue
 
@@ -83,3 +160,11 @@ disk snapshot).
   config).
 - "breakglass" was used for both this warm UI and the cluster-down SSH path —
   resolved: this context's **Breakglass** is the **Warm case** UI only.
+- "act as me" was used for both a shell session as `wizard` and an agent holding
+  admin capability — resolved: the **Fixer** is not an act-as. terminal-lobby's
+  `?as=` lens is a separate feature and is not part of this capability.
+- "a label for fixing" was read as both a router (which playbook to run) and a
+  permission (whether the agent may mutate) — resolved: **`broken`** routes to
+  the incident playbook; there is no separate permission label.
+- "no limits" appeared to contradict a chain guard — resolved: no budget, time or
+  depth caps, with the **Per-repo lock** as the only throttle.
