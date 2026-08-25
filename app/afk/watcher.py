@@ -167,12 +167,16 @@ class Watcher:
         ci_watcher: CIPort,
         notifier: NotifierPort,
         ready_for_human_label: str = DEFAULT_READY_FOR_HUMAN_LABEL,
+        checklist_labels: dict[Phase, str] | None = None,
     ) -> None:
         self._t3 = t3_client
         self._tracker = tracker
         self._ci = ci_watcher
         self._notifier = notifier
         self._ready_for_human_label = ready_for_human_label
+        # None keeps the AFK loop's own phase wording; the fixer passes labels
+        # that describe a repair rather than a test-first feature build.
+        self._checklist_labels = checklist_labels
 
     def tick(self, run: InFlightRun, config: Config) -> TickResult:
         """Drive ``run`` one step (see module docstring)."""
@@ -293,6 +297,7 @@ class Watcher:
                 "thread_id": run.thread_id,
                 "fix_forward_attempts": attempts,
             },
+            self._checklist_labels,
         )
         self._tracker.comment(run.issue.repo, run.issue.number, body)
 

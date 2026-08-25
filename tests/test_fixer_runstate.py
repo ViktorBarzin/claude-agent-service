@@ -177,3 +177,33 @@ def test_the_footer_is_never_a_commit_source():
     from app.fixer.runstate import find_pushed_commit
     body = render_footer(make_record(job_id="aaaaaaaaaaaa", commit="bbbbbbbbbbbb"))
     assert find_pushed_commit([body]) is None
+
+
+def test_every_job_id_in_the_thread_is_collected():
+    """Regression: excluding only the CURRENT run's job id left the previous
+    run's id in the thread readable as a pushed commit."""
+    from app.fixer.runstate import all_job_ids, find_pushed_commit
+    thread = [
+        render_comment("Picked this up.\n\n_Fixer run `e91bc819f056`._",
+                       make_record(job_id="e91bc819f056")),
+        "viktor: any luck?",
+        render_comment("Picked this up.\n\n_Fixer run `35af11b495cb`._",
+                       make_record(job_id="35af11b495cb")),
+    ]
+    assert all_job_ids(thread) == {"e91bc819f056", "35af11b495cb"}
+    assert find_pushed_commit(thread, exclude=all_job_ids(thread)) is None
+
+
+def test_all_job_ids_on_a_thread_with_no_footers_is_empty():
+    from app.fixer.runstate import all_job_ids
+    assert all_job_ids(["emo: broken", "viktor: looking"]) == set()
+
+
+def test_a_real_push_is_still_found_amid_several_job_ids():
+    from app.fixer.runstate import all_job_ids, find_pushed_commit
+    thread = [
+        render_comment("run one.\n\n_Fixer run `aaaaaaaaaaaa`._", make_record(job_id="aaaaaaaaaaaa")),
+        render_comment("run two.\n\n_Fixer run `bbbbbbbbbbbb`._", make_record(job_id="bbbbbbbbbbbb")),
+        "Pushed `1234abc` — raises the gunicorn timeout.",
+    ]
+    assert find_pushed_commit(thread, exclude=all_job_ids(thread)) == "1234abc"

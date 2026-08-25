@@ -96,6 +96,23 @@ def parse_footer(body: str) -> RunRecord | None:
     return None
 
 
+def all_job_ids(comment_bodies: list[str]) -> set[str]:
+    """Every job id this thread has recorded, across all footers.
+
+    A fix-forward chain accumulates one job id per turn, and each appears in the
+    prose of its own comment ("Fixer run `abc123def456`"). They are hex, so every
+    one of them can be mistaken for a pushed commit — not just the current run's.
+    Excluding the whole set is what makes :func:`find_pushed_commit` correct on a
+    thread with history rather than only on a fresh one.
+    """
+    out: set[str] = set()
+    for body in comment_bodies or []:
+        record = parse_footer(body)
+        if record is not None and record.job_id:
+            out.add(record.job_id)
+    return out
+
+
 def latest_record(comment_bodies: list[str]) -> RunRecord | None:
     """The current state of a run: the last parseable footer across its comments.
 

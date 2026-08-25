@@ -24,6 +24,7 @@ import urllib.request
 
 from app.afk.ci_watcher import StageResult  # noqa: F401  (documents the CI contract)
 from app.afk.notifier import Notifier
+from app.afk.phase_checklist import FIXER_LABELS
 from app.afk.poller import Poller
 from app.afk.tracker import Tracker
 from app.afk.types import Action, Config
@@ -35,6 +36,7 @@ from app.fixer.execute_client import ExecuteClient
 from app.fixer.forgejo import ForgejoClient
 from app.fixer.runstate import (
     RunRecord,
+    all_job_ids,
     find_pushed_commit,
     latest_record,
     render_comment,
@@ -157,6 +159,7 @@ def watch(forgejo, tracker, dispatcher, notifier, loop_cfg: Config, cfg) -> list
     watcher = Watcher(
         t3_client=dispatcher, tracker=tracker, ci_watcher=_ci_watcher(),
         notifier=notifier, ready_for_human_label=cfg.human_label,
+        checklist_labels=FIXER_LABELS,
     )
     lines: list[str] = []
     for repo in loop_cfg.allowlist:
@@ -175,9 +178,10 @@ def watch(forgejo, tracker, dispatcher, notifier, loop_cfg: Config, cfg) -> list
                 lines.append(f"{repo}#{number}: orphaned, escalated")
                 continue
 
-            # The run's own job id is hex and appears in its first comment, so it
-            # must never be mistaken for a pushed commit.
-            commit = find_pushed_commit(bodies, exclude={record.job_id}) or record.commit
+            # EVERY job id the thread has carried is hex and appears in prose, so
+            # none of them may be read as a pushed commit — not just this run's.
+            commit = (find_pushed_commit(bodies, exclude=all_job_ids(bodies))
+                      or record.commit)
             dispatcher.track(record.job_id)
             issue = _issue_for(tracker, repo, number, raw)
             run = InFlightRun(

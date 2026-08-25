@@ -53,7 +53,22 @@ _ACTIVE = "- [~]"
 _TODO = "- [ ]"
 
 
-def render(current: Phase, meta: dict[str, Any]) -> str:
+#: Alternative labels for a run that repairs something rather than building a
+#: feature test-first. The fixer passes these: its phases are diagnosis and
+#: repair, and a checklist claiming "Failing test written (TDD red)" on an
+#: incident misdescribes what the agent did — on an issue a human is reading.
+FIXER_LABELS: dict[Phase, str] = {
+    Phase.WORKTREE: "Picked up",
+    Phase.TESTS_RED: "Symptom verified",
+    Phase.GREEN: "Cause found and repaired",
+    Phase.PUSHED: "Pushed to master",
+    Phase.CI: "CI green on pushed commit",
+    Phase.DEPLOYED: "Deployed / rolled out",
+    Phase.DONE: "Done — issue closed",
+}
+
+
+def render(current: Phase, meta: dict[str, Any], labels: dict[Phase, str] | None = None) -> str:
     """Render the run's progress checklist as markdown (see module docstring).
 
     ``current`` is the phase the run is in right now; ``meta`` supplies optional
@@ -65,7 +80,7 @@ def render(current: Phase, meta: dict[str, Any]) -> str:
 
     lines = [_header(meta), ""]
     for index, phase in enumerate(_ORDER):
-        lines.append(f"{_marker(index, current_index, is_done)} {_LABELS[phase]}")
+        lines.append(f"{_marker(index, current_index, is_done)} {(labels or _LABELS)[phase]}")
 
     note = _fix_forward_note(meta)
     if note is not None:

@@ -340,3 +340,20 @@ def test_a_rejected_publish_raises_rather_than_failing_quietly():
     with pytest.raises(RuntimeError, match="403"):
         send(Notification(kind="done", issue_ref="infra#7", title="t", body="b",
                           link=None, priority="low", tags=[]))
+
+
+def test_the_fixer_checklist_describes_a_repair_not_a_tdd_build():
+    """The AFK wording ("Failing test written (TDD red)") misdescribes an
+    incident fix on an issue a human reads."""
+    from app.afk.phase_checklist import FIXER_LABELS, render
+    from app.afk.types import Phase
+    body = render(Phase.GREEN, {"repo": "infra", "issue": 30, "thread_id": "j"}, FIXER_LABELS)
+    assert "Symptom verified" in body and "Cause found and repaired" in body
+    assert "TDD" not in body
+
+
+def test_the_afk_wording_is_unchanged_when_no_labels_are_passed():
+    from app.afk.phase_checklist import render
+    from app.afk.types import Phase
+    body = render(Phase.GREEN, {"repo": "x", "issue": 1, "thread_id": "j"})
+    assert "TDD red" in body
