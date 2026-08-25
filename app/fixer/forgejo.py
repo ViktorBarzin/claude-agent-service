@@ -161,6 +161,16 @@ class ForgejoClient:
         q = urllib.parse.urlencode({"limit": 100})
         return self._call("GET", f"/repos/{self._slug(repo)}/issues/{number}/comments?{q}") or []
 
+    def edit_comment(self, repo: str, comment_id: int, body: str) -> None:
+        """Rewrite an existing comment in place.
+
+        Used to refresh the progress checklist rather than append a new copy of
+        it: a tick runs every couple of minutes, so appending would bury the
+        issue's actual conversation under dozens of near-identical comments.
+        """
+        self._call("PATCH", f"/repos/{self._slug(repo)}/issues/comments/{comment_id}",
+                   {"body": body})
+
     def assign(self, repo: str, number: int, assignee: str) -> None:
         self._call("PATCH", f"/repos/{self._slug(repo)}/issues/{number}",
                    {"assignees": [assignee]})

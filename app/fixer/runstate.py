@@ -106,3 +106,37 @@ def latest_record(comment_bodies: list[str]) -> RunRecord | None:
         if record is not None:
             return record
     return None
+
+
+#: A git sha as an agent writes it in prose — 7 to 40 hex chars, on a word
+#: boundary so ordinary words never match. Deliberately not anchored to a
+#: sentence shape: runs phrase it differently every time ("pushed abc1234",
+#: "commit `abc1234`", "landed as abc1234").
+_SHA_RE = re.compile(r"\b([0-9a-f]{7,40})\b")
+
+# Words that are all hex characters and would otherwise read as a sha. Short
+# enough to be plausible in prose, so they are excluded by name rather than by
+# a cleverer pattern.
+_SHA_FALSE_FRIENDS = frozenset({
+    "deadbeef", "cafebabe", "accede", "decade", "defaced", "effaced", "facade",
+})
+
+
+def find_pushed_commit(comment_bodies: list[str]) -> str | None:
+    """The most recent commit sha mentioned across ``comment_bodies``.
+
+    A fixer run states the sha it pushed in a comment, and this is what turns
+    that prose into the ``commit`` the state machine needs. Later mentions win,
+    so a fix-forward turn's sha supersedes the one before it.
+
+    Returns ``None`` when nothing looks like a sha, which is the correct reading
+    of "the run has not pushed yet".
+    """
+    for body in reversed(comment_bodies or []):
+        # Skip the hidden footer: it carries a sha of its own, and reading it
+        # back here would make the extraction circular.
+        visible = _FOOTER_RE.sub("", body or "")
+        matches = [m for m in _SHA_RE.findall(visible) if m not in _SHA_FALSE_FRIENDS]
+        if matches:
+            return matches[-1]
+    return None

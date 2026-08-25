@@ -23,7 +23,6 @@ import time
 
 from fastapi import APIRouter, Request, Response
 
-from app.afk import config as afk_config
 from app.fixer import config as fixer_config
 from app.fixer import gates, prompts, signature
 from app.fixer.forgejo import ForgejoClient
@@ -62,7 +61,7 @@ def _repo_locked(client: ForgejoClient, cfg, repo: str, in_progress_label: str) 
 async def forgejo_hook(request: Request, response: Response) -> dict:
     """Handle one Forgejo webhook delivery."""
     cfg = fixer_config.from_env()
-    loop_cfg = afk_config.from_env()
+    loop_cfg = fixer_config.loop_config()
 
     if not cfg.configured:
         response.status_code = 503

@@ -16,8 +16,12 @@ Two deliberate defaults:
     with cluster write is not a state worth having, even briefly.
 """
 import os
+import sys
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+
+from app.afk import config as afk_config
+from app.afk.types import Config as AfkConfig
 
 ENV_FORGEJO_API = "FIXER_FORGEJO_API"
 ENV_FORGEJO_WEB = "FIXER_FORGEJO_WEB"
@@ -127,3 +131,32 @@ def from_env(env: Mapping[str, str] | None = None) -> FixerConfig:
         max_budget_usd=opt_float(ENV_MAX_BUDGET_USD),
         timeout_seconds=opt_int(ENV_TIMEOUT_SECONDS),
     )
+
+
+# The fixer runs with NO fix-forward ceiling (design doc, decision 14): a run is
+# bounded by the per-repo lock — one at a time — not by attempts or wall-clock.
+# ``run_state_machine`` compares strictly against these bounds, so "unbounded" is
+# expressed as a value no real run reaches rather than by changing that pure
+# function's contract. ``sys.maxsize`` keeps both fields the ``int`` their
+# dataclass declares.
+UNBOUNDED = sys.maxsize
+
+
+def loop_config(env: Mapping[str, str] | None = None) -> AfkConfig:
+    """The AFK loop config as the fixer runs it.
+
+    Everything comes from ``app.afk.config.from_env`` — allowlist, kill switch,
+    labels — except the two fix-forward bounds, which default to unbounded here
+    instead of the loop's 5 attempts / 3600 seconds. An explicit
+    ``AFK_FIX_FORWARD_MAX_*`` in the environment still wins, so a deployment can
+    put a ceiling back without a code change.
+    """
+    e = env if env is not None else os.environ
+    base = afk_config.from_env(e)
+    attempts = base.fix_forward_max_attempts
+    seconds = base.fix_forward_max_seconds
+    if not (e.get(afk_config.ENV_FIX_FORWARD_MAX_ATTEMPTS) or "").strip():
+        attempts = UNBOUNDED
+    if not (e.get(afk_config.ENV_FIX_FORWARD_MAX_SECONDS) or "").strip():
+        seconds = UNBOUNDED
+    return replace(base, fix_forward_max_attempts=attempts, fix_forward_max_seconds=seconds)
