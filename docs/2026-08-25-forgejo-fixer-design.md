@@ -236,11 +236,15 @@ because each was invisible to the tests:
    .claude/agents/issue-responder` fails with "not found" while listing
    `issue-responder` as available. The path form came from the retired Woodpecker
    pipeline.
-3. **A run's own job id read as a pushed commit.** Job ids are 12 hex characters
-   and the run's first comment prints one, so the sha extractor treated a run
-   that had pushed nothing as pushed — then waited on CI for a commit that never
-   existed. Excluding only the current run's id was still one run too narrow: a
-   thread accumulates one id per turn, and all of them must be excluded.
+3. **Inferring the pushed commit from prose does not work, and was removed.**
+   Job ids are 12 hex characters and every run prints its own; excluding those
+   was still not enough — a live run that correctly changed *nothing* was
+   recorded as having pushed because its report named the running image tag
+   (`b0ef3eca`). Each false positive left the state machine waiting on CI for a
+   commit that did not exist. A run now **declares** its commit on its own line
+   (`Pushed-Commit: <sha>`) and nothing else is read as one. An undeclared push
+   reads as not-pushed and escalates to a human — a missing marker costs one
+   notification, a phantom commit costs a stuck run.
 4. **The doorbell needed authentication.** ntfy here is
    `NTFY_AUTH_DEFAULT_ACCESS=deny-all`, so the first real escalation relabelled
    the issue correctly and then failed to tell anyone (403).
