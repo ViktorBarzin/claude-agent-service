@@ -138,3 +138,42 @@ def test_elapsed_seconds_measures_from_the_start_stamp():
 def test_elapsed_seconds_never_goes_negative():
     """Clock skew between pods must not read as a run from the future."""
     assert make_record(started_at=2000.0).elapsed_seconds(1000.0) == 0.0
+
+
+# --------------------------------------------------------------------------- #
+# find_pushed_commit — the job id is hex and must not read as a commit.
+# --------------------------------------------------------------------------- #
+def test_find_pushed_commit_reads_a_sha_from_prose():
+    from app.fixer.runstate import find_pushed_commit
+    assert find_pushed_commit(["Pushed `9f8e7d6c5b4a` — raises the limit."]) == "9f8e7d6c5b4a"
+
+
+def test_find_pushed_commit_is_none_before_anything_is_pushed():
+    from app.fixer.runstate import find_pushed_commit
+    assert find_pushed_commit(["Investigating.", "Still looking."]) is None
+
+
+def test_the_runs_own_job_id_is_not_a_commit():
+    """Regression: a 12-hex job id in the run's own comment read as a push, so a
+    dead run waited on CI for a commit that never existed."""
+    from app.fixer.runstate import find_pushed_commit
+    bodies = [render_comment("Picked this up.\n\n_Fixer run `e91bc819f056`._",
+                             make_record(job_id="e91bc819f056"))]
+    assert find_pushed_commit(bodies, exclude={"e91bc819f056"}) is None
+
+
+def test_a_real_sha_still_wins_over_an_excluded_job_id():
+    from app.fixer.runstate import find_pushed_commit
+    bodies = [
+        render_comment("Picked this up.\n\n_Fixer run `e91bc819f056`._",
+                       make_record(job_id="e91bc819f056")),
+        "Pushed `abc1234` — bumps the memory limit.",
+    ]
+    assert find_pushed_commit(bodies, exclude={"e91bc819f056"}) == "abc1234"
+
+
+def test_the_footer_is_never_a_commit_source():
+    """The footer carries the job id and the commit; reading it back would loop."""
+    from app.fixer.runstate import find_pushed_commit
+    body = render_footer(make_record(job_id="aaaaaaaaaaaa", commit="bbbbbbbbbbbb"))
+    assert find_pushed_commit([body]) is None

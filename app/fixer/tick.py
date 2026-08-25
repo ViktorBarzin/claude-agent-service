@@ -175,7 +175,9 @@ def watch(forgejo, tracker, dispatcher, notifier, loop_cfg: Config, cfg) -> list
                 lines.append(f"{repo}#{number}: orphaned, escalated")
                 continue
 
-            commit = find_pushed_commit(bodies) or record.commit
+            # The run's own job id is hex and appears in its first comment, so it
+            # must never be mistaken for a pushed commit.
+            commit = find_pushed_commit(bodies, exclude={record.job_id}) or record.commit
             dispatcher.track(record.job_id)
             issue = _issue_for(tracker, repo, number, raw)
             run = InFlightRun(

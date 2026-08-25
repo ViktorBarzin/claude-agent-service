@@ -122,21 +122,30 @@ _SHA_FALSE_FRIENDS = frozenset({
 })
 
 
-def find_pushed_commit(comment_bodies: list[str]) -> str | None:
+def find_pushed_commit(
+    comment_bodies: list[str], exclude: frozenset[str] | set[str] = frozenset()
+) -> str | None:
     """The most recent commit sha mentioned across ``comment_bodies``.
 
     A fixer run states the sha it pushed in a comment, and this is what turns
     that prose into the ``commit`` the state machine needs. Later mentions win,
     so a fix-forward turn's sha supersedes the one before it.
 
+    ``exclude`` is for identifiers that are hex but are not commits — above all
+    the run's own JOB ID, which is 12 hex characters and appears in the run's
+    first comment ("Fixer run `e91bc819f056`"). Without it, a run that has pushed
+    nothing reads as pushed, and the state machine waits on CI for a commit that
+    does not exist instead of noticing the run died.
+
     Returns ``None`` when nothing looks like a sha, which is the correct reading
     of "the run has not pushed yet".
     """
+    skip = _SHA_FALSE_FRIENDS | {str(x) for x in exclude}
     for body in reversed(comment_bodies or []):
-        # Skip the hidden footer: it carries a sha of its own, and reading it
-        # back here would make the extraction circular.
+        # Skip the hidden footer: it carries the job id and any recorded commit,
+        # and reading those back here would make the extraction circular.
         visible = _FOOTER_RE.sub("", body or "")
-        matches = [m for m in _SHA_RE.findall(visible) if m not in _SHA_FALSE_FRIENDS]
+        matches = [m for m in _SHA_RE.findall(visible) if m not in skip]
         if matches:
             return matches[-1]
     return None
