@@ -1,6 +1,6 @@
 # The fixer — a `broken` issue on Forgejo repairs itself
 
-**Status:** designed, not yet built · **Date:** 2026-08-25 · **Repo:**
+**Status:** built and live, 2026-08-25 · **Date:** 2026-08-25 · **Repo:**
 `claude-agent-service` (control plane) + `infra` (labels, webhook, agent
 definition) · **Owner:** Viktor (wizard) · **Flow:** grill-with-docs
 
@@ -184,6 +184,87 @@ they describe the observed state rather than the reporter or the wish.
 This vocabulary has to reach the agents that apply it, or the trigger misfires:
 both users' `file-issue` skills, the `issue-responder` definition, and
 `CONTEXT.md`'s glossary.
+
+## Built and live — 2026-08-25
+
+Everything below shipped the same day it was designed. The chain was verified
+end to end with a deliberate probe filed as `emo`
+([`viktor/infra#30`](https://forgejo.viktorbarzin.me/viktor/infra/issues/30)):
+the webhook dispatched, the run read the issue, ran the "verify it is actually
+broken" step, concluded correctly that nothing was broken, reported its
+evidence, relabelled the issue `change`, closed it, and changed nothing in the
+cluster.
+
+What went in:
+
+| Piece | Where |
+|---|---|
+| `POST /hooks/forgejo` + the pure admission gates | `app/fixer/{receiver,gates,signature}.py` |
+| Forgejo adapter satisfying the existing tracker port | `app/fixer/forgejo.py` |
+| Run state as a hidden footer on the run's own comment | `app/fixer/runstate.py` |
+| One-shot `/execute` behind the loop's T3-shaped ports | `app/fixer/execute_client.py` |
+| CI verdict (Woodpecker decisive, GHA stage optional) | `app/fixer/ci.py` |
+| The tick: drain the queue, drive in-flight runs | `app/fixer/tick.py` |
+| Doorbell over ntfy, write-only to one topic | `app/fixer/ntfy.py` |
+| Unbounded budget/timeout; `start_job` shared with `/execute` | `app/main.py` |
+| Responder rewritten for Forgejo, platform stacks in scope | `infra/.claude/agents/issue-responder.md` |
+| Bot identity, both secrets, env, `fixer-tick` CronJob | `infra/stacks/claude-agent-service/main.tf` |
+| `file-issue` on Forgejo with each caller's own PAT | vendored + both users' skill dirs |
+| The fixer section in emo's `CLAUDE.md` | `/home/emo/.claude/CLAUDE.md` |
+
+Out-of-band identities created (not Terraform-managed, recorded here):
+`infra-agent` on Forgejo (write:repository + write:issue, collaborator on
+`viktor/infra`), a write-only `fixer` ntfy user scoped to the `fixer` topic, the
+ten labels, and the repo webhook. emo's own Forgejo PAT was reminted with
+`write:issue` added — his previous one was repository-scoped only, so the
+filing path would have 403'd for him.
+
+The 23 open GitHub issues were migrated to Forgejo with backlinks and closed on
+GitHub; `ViktorBarzin/infra` now has no open issues. Everything moved as
+`change` except the one `user-report`, which is `broken`.
+
+### What live running found that the design did not
+
+Five defects surfaced only by running the real thing, which is worth recording
+because each was invisible to the tests:
+
+1. **The fix-forward budget contradicted the no-caps decision.** The loop's
+   shipped bounds (5 attempts / 3600s) are compared strictly, so every run older
+   than an hour would have frozen instead of correcting. The fixer now loads an
+   unbounded default and leaves the pure state machine's contract alone.
+2. **The agent is resolved by name, not by path.** `--agent
+   .claude/agents/issue-responder` fails with "not found" while listing
+   `issue-responder` as available. The path form came from the retired Woodpecker
+   pipeline.
+3. **A run's own job id read as a pushed commit.** Job ids are 12 hex characters
+   and the run's first comment prints one, so the sha extractor treated a run
+   that had pushed nothing as pushed — then waited on CI for a commit that never
+   existed. Excluding only the current run's id was still one run too narrow: a
+   thread accumulates one id per turn, and all of them must be excluded.
+4. **The doorbell needed authentication.** ntfy here is
+   `NTFY_AUTH_DEFAULT_ACCESS=deny-all`, so the first real escalation relabelled
+   the issue correctly and then failed to tell anyone (403).
+5. **The progress checklist described the wrong work.** Inherited from the AFK
+   loop, it claimed "Failing test written (TDD red)" on an incident fix, on an
+   issue a person reads. The fixer now passes phases that describe a repair.
+
+Two smaller ones: the tick CronJob needed `working_dir = /srv`, where the image
+bakes the app; and a run that closes its own issue must drop the
+`agent-in-progress` label, which a closed issue no longer needs but a reader
+still sees.
+
+### Still open
+
+- **The GitHub Actions build stage is unobserved** unless `FIXER_GITHUB_TOKEN`
+  is set. Woodpecker's apply is the decisive stage for infra, so verdicts rest
+  on it; the log says so on every tick rather than leaving it implicit.
+- **A webhook delivery during a pod roll is lost.** Observed during this build:
+  Forgejo delivered while Keel was rolling the deployment, so the issue sat
+  until the next tick drained it. That is the drain working as designed, at up
+  to two minutes of latency.
+- **Chain depth and rate caps are gone**, replaced by the per-repo lock. Nothing
+  yet exercises a long fix-forward chain, so the convergence behaviour is
+  reasoned about rather than observed.
 
 ## Decisions
 
