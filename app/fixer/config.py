@@ -47,7 +47,10 @@ DEFAULT_TRIGGER_LABEL = "broken"
 DEFAULT_PAUSED_LABEL = "paused"
 DEFAULT_HUMAN_LABEL = "needs-human"
 DEFAULT_ESCALATE_TO = "viktor"
-DEFAULT_AGENT = ".claude/agents/issue-responder"
+# The CLI resolves agents by NAME, not by path: `--agent .claude/agents/issue-responder`
+# fails with "not found" even though the file is there. The retired Woodpecker
+# pipeline passed the path, which is where the wrong value came from.
+DEFAULT_AGENT = "issue-responder"
 DEFAULT_NTFY_URL = "https://ntfy.viktorbarzin.me"
 DEFAULT_NTFY_TOPIC = "fixer"
 
