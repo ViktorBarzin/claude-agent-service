@@ -90,6 +90,17 @@ def _deep_link(base_url: str, thread_id: str | None) -> str | None:
     return f"{base_url.rstrip('/')}/?thread={thread_id}"
 
 
+#: Builds the click-through for a notification, from (base_url, issue, thread_id).
+#: Defaults to the T3 thread deep-link. The fixer injects one that points at the
+#: Forgejo issue instead, because there is no thread to open — the issue IS the
+#: conversation (design doc, "Execution model").
+LinkBuilder = Callable[[str, Issue, "str | None"], "str | None"]
+
+
+def _default_link(base_url: str, issue: Issue, thread_id: str | None) -> str | None:
+    return _deep_link(base_url, thread_id)
+
+
 def render_notification(
     kind: str,
     issue: Issue,
@@ -97,6 +108,7 @@ def render_notification(
     detail: str,
     *,
     base_url: str = DEFAULT_BASE_URL,
+    link_builder: LinkBuilder = _default_link,
 ) -> Notification:
     """Build the :class:`Notification` for a terminal event — pure, no I/O.
 
@@ -111,13 +123,13 @@ def render_notification(
 
     marker, headline, priority, tags = _PRESENTATION[kind]
     issue_ref = f"{issue.repo}#{issue.number}"
-    link = _deep_link(base_url, thread_id)
+    link = link_builder(base_url, issue, thread_id)
 
     title = f"{marker} {issue_ref} {headline}"
 
     body_lines = [detail]
     if link is not None:
-        body_lines.append(f"Thread: {link}")
+        body_lines.append(f"Link: {link}")
     body = "\n".join(body_lines)
 
     return Notification(
@@ -139,9 +151,16 @@ class Notifier:
     test injects a recording fake and asserts the payload without posting.
     """
 
-    def __init__(self, sender: Sender, *, base_url: str = DEFAULT_BASE_URL) -> None:
+    def __init__(
+        self,
+        sender: Sender,
+        *,
+        base_url: str = DEFAULT_BASE_URL,
+        link_builder: LinkBuilder = _default_link,
+    ) -> None:
         self._sender = sender
         self._base_url = base_url
+        self._link_builder = link_builder
 
     def notify(self, kind: str, issue: Issue, thread_id: str | None, detail: str) -> None:
         """Format a terminal-state alert and deliver it via the injected sender.
@@ -150,6 +169,7 @@ class Notifier:
         lets a sender failure propagate — see the module docstring.
         """
         notification = render_notification(
-            kind, issue, thread_id, detail, base_url=self._base_url
+            kind, issue, thread_id, detail,
+            base_url=self._base_url, link_builder=self._link_builder,
         )
         self._sender(notification)

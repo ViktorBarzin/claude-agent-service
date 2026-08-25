@@ -16,6 +16,8 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from app import conversational
+from app.fixer import config as fixer_config
+from app.fixer import receiver as fixer_receiver
 
 app = FastAPI(title="Claude Agent Service")
 
@@ -85,8 +87,13 @@ _last_fetch_epoch = 0.0
 class ExecuteRequest(BaseModel):
     prompt: str
     agent: str
-    max_budget_usd: float = 5.0
-    timeout_seconds: int = 2700
+    # ``None`` means NO ceiling — the flag is omitted from the CLI argv and the
+    # execution is not raced against a clock. The fixer dispatches this way on
+    # purpose (design doc, decision 14): a run is bounded by the per-repo lock,
+    # one at a time, rather than by caps that would truncate a hard diagnosis
+    # mid-way. Every other caller keeps the historical defaults.
+    max_budget_usd: float | None = 5.0
+    timeout_seconds: int | None = 2700
     metadata: dict | None = None
 
 
@@ -249,7 +256,7 @@ async def cleanup_workspace(path: str | None) -> None:
 async def _invoke_claude_subprocess(
     prompt: str,
     agent: str,
-    max_budget_usd: float,
+    max_budget_usd: float | None,
     workspace: str,
     model: str | None = None,
 ) -> dict[str, Any]:
@@ -267,9 +274,12 @@ async def _invoke_claude_subprocess(
         "claude", "-p",
         "--agent", agent,
         "--dangerously-skip-permissions",
-        "--max-budget-usd", str(max_budget_usd),
         "--output-format", "json",
     ]
+    # A budget of None means "no ceiling": omit the flag rather than passing a
+    # sentinel, so the CLI applies none at all.
+    if max_budget_usd is not None:
+        cmd.extend(["--max-budget-usd", str(max_budget_usd)])
     if model is not None:
         cmd.extend(["--model", model])
     cmd.append(prompt)
@@ -406,15 +416,17 @@ async def health():
     }
 
 
-@app.post("/execute", status_code=202)
-async def execute(
-    request: ExecuteRequest,
-    authorization: str | None = Header(default=None),
-):
-    verify_token(authorization)
+def start_job(request: ExecuteRequest) -> str:
+    """Queue a job and return its id — the shared path into the runner.
 
+    Both ``POST /execute`` and the fixer's webhook receiver come through here, so
+    a job started by a webhook is indistinguishable from any other: same queue
+    slot accounting, same ``jobs`` record, same background worker. Raises
+    ``RuntimeError`` when the queue is full; the HTTP caller maps that to 429 and
+    the receiver lets it surface (an un-dispatched run must not be labelled).
+    """
     if not _reserve_queue_slot():
-        raise HTTPException(status_code=429, detail="Queue full")
+        raise RuntimeError("queue full")
 
     job_id = uuid.uuid4().hex[:12]
     jobs[job_id] = {
@@ -424,9 +436,37 @@ async def execute(
         "created_at": _now_iso(),
         "metadata": request.metadata,
     }
-
     asyncio.create_task(_run_execute_job(job_id, request))
+    return job_id
 
+
+def _submit_fixer_job(prompt: str) -> str:
+    """Start a fixer run. The agent and the (absent) ceilings come from config,
+    so the receiver never has to know how the runner is invoked."""
+    cfg = fixer_config.from_env()
+    return start_job(ExecuteRequest(
+        prompt=prompt,
+        agent=cfg.agent,
+        max_budget_usd=cfg.max_budget_usd,
+        timeout_seconds=cfg.timeout_seconds,
+        metadata={"source": "fixer"},
+    ))
+
+
+app.include_router(fixer_receiver.router)
+fixer_receiver.set_submitter(_submit_fixer_job)
+
+
+@app.post("/execute", status_code=202)
+async def execute(
+    request: ExecuteRequest,
+    authorization: str | None = Header(default=None),
+):
+    verify_token(authorization)
+    try:
+        job_id = start_job(request)
+    except RuntimeError:
+        raise HTTPException(status_code=429, detail="Queue full")
     return {"job_id": job_id, "status": "queued"}
 
 
