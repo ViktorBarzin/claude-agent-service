@@ -14,8 +14,8 @@ emo (Emil, OS user `emo`, tier `power-user`) works on this box daily and reaches
 walls he cannot pass on his own. Today those walls end at Viktor: emo writes up
 what he found, and the work waits until Viktor is available.
 
-The shape of the wall is narrow and measurable. Across emo's 126 Claude
-transcripts, every access denial is **cluster-side**:
+The shape of the wall is narrow, and the evidence is specific. Across emo's 126
+Claude transcripts, every access denial is **cluster-side**:
 
 | Denial | Namespaces |
 |---|---|
@@ -24,8 +24,8 @@ transcripts, every access denial is **cluster-side**:
 | `delete pods` (stuck pod) | immich |
 | `get middlewares`, `list resourcequotas` | traefik, immich |
 
-`Error from server (Forbidden)` appears 50 times. Two absences matter as much as
-the hits: **no** `protected branch` or `pre-receive hook declined` (git is
+`Error from server (Forbidden)` appears 50 times. Two absences are informative:
+no `protected branch` or `pre-receive hook declined` (git is
 already unblocked — `ebarzin` is on the master push+merge whitelist), and the 8
 `sudo: a password is required` hits are all on the Synology as
 `uid=1027(Administrator)`, not on the devvm. Nothing in a month of his work
@@ -51,7 +51,7 @@ A `broken` issue on Forgejo `viktor/infra` gets diagnosed and repaired
 autonomously — including editing code and pushing to `master` — so emo is
 unblocked while Viktor is away, and Viktor reads what happened afterwards.
 
-Deliberately **not** in scope: giving emo a session as `wizard`. That path was
+Deliberately not in scope: giving emo a session as `wizard`. That path was
 considered and set aside, because `wizard` holds `(ALL:ALL) NOPASSWD: ALL` — a
 shell as `wizard` is devvm root, the git-crypt master key, `infra/secrets/`
 plaintext, `secret/viktor`, a cluster-admin kubeconfig, and a Vaultwarden with
@@ -79,7 +79,7 @@ The AFK loop landed on `master` (`e34640c`) on 2026-06-15 with 412 tests and
 ships disabled — `kill_switch=True` plus an empty allowlist, and arming needs
 both. Its executor, the `t3-afk` T3 instance, was scaled to 0/0 the same day
 ("no current plans to use the autonomous AFK pipeline") with its PVC, Service,
-Ingress and ExternalSecret preserved. This design does **not** revive it.
+Ingress and ExternalSecret preserved. This design does not revive it.
 
 ## The design
 
@@ -131,7 +131,7 @@ but no runner exists anywhere in the cluster, and standing one up is in-cluster
 CI compute, which infra ADR-0002 rules out. **Woodpecker** cannot be the
 receiver either: its hook endpoint understands push/PR/tag, not issue events, so
 it would need a translator regardless. A webhook into the service that
-ultimately runs the agent removes the hop instead of adding one.
+ultimately runs the agent reaches the same dispatch with one hop fewer.
 
 ### Why Forgejo rather than GitHub
 
@@ -140,7 +140,7 @@ Forgejo (both remotes point there; there is no GitHub remote). So the
 responder's `git push origin master` and its `fixes #N` convention already
 resolve against Forgejo issue numbers, while the issue it was dispatched for is
 a GitHub issue with an unrelated number. On Forgejo the tracker and the commit
-convention agree for the first time.
+convention refer to the same issue.
 
 ### Execution model
 
@@ -152,8 +152,8 @@ session state to keep alive. Continuity is expressed in the tracker instead:
   queue.
 - The agent's comment carries a machine-readable footer — job id, pushed sha,
   attempt count, chain parent — so a cold-started successor knows what its
-  predecessor did. No new datastore; the tracker is the memory, and the trail is
-  human-readable by construction.
+  predecessor did. No new datastore; the tracker is the memory, and the trail
+  stays human-readable.
 - Before closing, the run **re-checks the original symptom**, not only that CI
   went green. A green deploy that did not fix the reported thing counts as
   further work, so it fix-forwards rather than closing.
@@ -210,7 +210,7 @@ both users' `file-issue` skills, the `issue-responder` definition, and
 
 ## Safety posture
 
-What actually bounds this, stated plainly:
+What bounds this:
 
 - **Serialization.** One fixer at a time, `infra` only. A runaway consumes one
   job's worth of headroom at a time, not a fleet's.
@@ -232,19 +232,19 @@ What actually bounds this, stated plainly:
 
 ### Risks accepted
 
-- **The fixer can break its own reporting path.** Dropping the platform-stack
+- **Reporting path.** Dropping the platform-stack
   exclusion means a bad Vault, traefik, or authentik change can remove the
   agent's ability to tell anyone what it did. Mitigated by ordering — on those
   five stacks it captures findings and comments them **before** mutating, the
   same rule breakglass's `forensics` step encodes — but not eliminated.
-- **The brake cannot reach a running job.** Both stops prevent the next
+- **The brake.** Both stops prevent the next
   dispatch; neither cancels one mid-flight. `kubectl scale` remains the only hard
   stop and takes the other consumers of `claude-agent-service` with it.
-- **Half of emo's backlog still waits.** Roughly five of his eleven issues are
+- **Coverage.** Roughly five of his eleven issues are
   `broken`; the rest are `change`, and app-code bugs (#23, the tuya-bridge
   gunicorn hang) are out of repo scope. This makes the urgent half self-service,
   not all of it. The trigger can widen later without redesign.
-- **Agent triggers agent.** emo's Claude files `broken` autonomously, and a
+- **Chained triggers.** emo's Claude files `broken` autonomously, and a
   fixer can file a follow-up `broken`. The per-repo lock and the `paused` label
   are what stand between that and a chain nobody asked for.
 
