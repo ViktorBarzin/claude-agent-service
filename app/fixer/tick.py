@@ -127,7 +127,7 @@ def build(cfg: fixer_config.FixerConfig, service_url: str, service_token: str):
     jobs = ServiceJobs(service_url, service_token, cfg.agent, cfg)
     dispatcher = FixerDispatcher(ExecuteClient(jobs.submit, jobs.fetch), forgejo, cfg)
     notifier = Notifier(
-        ntfy.make_sender(cfg.ntfy_url, cfg.ntfy_topic),
+        ntfy.make_sender(cfg.ntfy_url, cfg.ntfy_topic, cfg.ntfy_token),
         base_url=f"{cfg.forgejo_web.rstrip('/')}/{cfg.owner}",
         link_builder=ntfy.forgejo_link,
     )

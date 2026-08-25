@@ -293,3 +293,50 @@ def test_drain_comments_the_run_state_on_what_it_starts():
     assert started == 1
     record = latest_record([b for _, b in f.posted])
     assert record is not None and record.job_id == "job-x"
+
+
+# --------------------------------------------------------------------------- #
+# The doorbell — this ntfy is deny-all, so an unauthenticated publish is a 403.
+# --------------------------------------------------------------------------- #
+def test_the_doorbell_authenticates_when_a_token_is_configured():
+    from app.afk.notifier import Notification
+    from app.fixer import ntfy as ntfy_mod
+    seen = {}
+
+    def poster(url, body, headers):
+        seen.update({"url": url, "headers": headers, "body": body})
+        return 200
+
+    send = ntfy_mod.make_sender("https://ntfy.example", "fixer", "tk_secret", poster)
+    send(Notification(kind="done", issue_ref="infra#7", title="[DONE] infra#7 landed",
+                      body="all good", link="https://forgejo/x", priority="low",
+                      tags=["afk", "done"]))
+    assert seen["url"] == "https://ntfy.example/fixer"
+    assert seen["headers"]["Authorization"] == "Bearer tk_secret"
+    assert seen["headers"]["Priority"] == "2"
+    assert seen["headers"]["Click"] == "https://forgejo/x"
+
+
+def test_the_doorbell_omits_the_header_when_no_token_is_set():
+    from app.afk.notifier import Notification
+    from app.fixer import ntfy as ntfy_mod
+    seen = {}
+
+    def poster(url, body, headers):
+        seen.update(headers)
+        return 200
+
+    ntfy_mod.make_sender("https://ntfy.example", "fixer", "", poster)(
+        Notification(kind="frozen", issue_ref="infra#7", title="t", body="b",
+                     link=None, priority="high", tags=[]))
+    assert "Authorization" not in seen
+    assert seen["Priority"] == "5"
+
+
+def test_a_rejected_publish_raises_rather_than_failing_quietly():
+    from app.afk.notifier import Notification
+    from app.fixer import ntfy as ntfy_mod
+    send = ntfy_mod.make_sender("https://ntfy.example", "fixer", "", lambda u, b, h: 403)
+    with pytest.raises(RuntimeError, match="403"):
+        send(Notification(kind="done", issue_ref="infra#7", title="t", body="b",
+                          link=None, priority="low", tags=[]))

@@ -36,6 +36,7 @@ ENV_ESCALATE_TO = "FIXER_ESCALATE_TO"
 ENV_AGENT = "FIXER_AGENT"
 ENV_NTFY_URL = "FIXER_NTFY_URL"
 ENV_NTFY_TOPIC = "FIXER_NTFY_TOPIC"
+ENV_NTFY_TOKEN = "FIXER_NTFY_TOKEN"
 ENV_MAX_BUDGET_USD = "FIXER_MAX_BUDGET_USD"
 ENV_TIMEOUT_SECONDS = "FIXER_TIMEOUT_SECONDS"
 
@@ -72,6 +73,7 @@ class FixerConfig:
     agent: str = DEFAULT_AGENT
     ntfy_url: str = DEFAULT_NTFY_URL
     ntfy_topic: str = DEFAULT_NTFY_TOPIC
+    ntfy_token: str = ""
     max_budget_usd: float | None = None
     timeout_seconds: int | None = None
 
@@ -131,6 +133,7 @@ def from_env(env: Mapping[str, str] | None = None) -> FixerConfig:
         agent=text(ENV_AGENT, DEFAULT_AGENT),
         ntfy_url=text(ENV_NTFY_URL, DEFAULT_NTFY_URL),
         ntfy_topic=text(ENV_NTFY_TOPIC, DEFAULT_NTFY_TOPIC),
+        ntfy_token=text(ENV_NTFY_TOKEN, ""),
         max_budget_usd=opt_float(ENV_MAX_BUDGET_USD),
         timeout_seconds=opt_int(ENV_TIMEOUT_SECONDS),
     )

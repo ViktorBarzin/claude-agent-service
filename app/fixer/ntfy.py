@@ -48,8 +48,16 @@ def forgejo_link(base_url: str, issue: Issue, thread_id: str | None) -> str | No
     return f"{base_url.rstrip('/')}/{issue.repo}/issues/{issue.number}"
 
 
-def make_sender(ntfy_url: str, topic: str, poster: Poster | None = None):
-    """Build a notifier sender that posts to ``topic`` on ``ntfy_url``."""
+def make_sender(
+    ntfy_url: str, topic: str, token: str = "", poster: Poster | None = None
+):
+    """Build a notifier sender that posts to ``topic`` on ``ntfy_url``.
+
+    ``token`` is required in practice: this ntfy runs
+    ``NTFY_AUTH_DEFAULT_ACCESS=deny-all``, so an unauthenticated publish is a
+    403 and the doorbell never rings. The fixer publishes as a write-only user
+    scoped to this one topic.
+    """
     send: Poster = poster or _urllib_poster
     endpoint = f"{ntfy_url.rstrip('/')}/{topic}"
 
@@ -61,6 +69,8 @@ def make_sender(ntfy_url: str, topic: str, poster: Poster | None = None):
         }
         if notification.link:
             headers["Click"] = notification.link
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
         status = send(endpoint, notification.body.encode("utf-8"), headers)
         if status >= 400:
             raise RuntimeError(f"ntfy {endpoint} -> HTTP {status}")
