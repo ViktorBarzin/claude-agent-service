@@ -262,10 +262,32 @@ def main(argv: list[str] | None = None) -> int:
                  [f"{i.repo}#{i.number}" for i in ready])
         return 0
 
-    started = drain(tracker, dispatcher, forgejo, loop_cfg, cfg)
-    lines = watch(forgejo, tracker, dispatcher, notifier, loop_cfg, cfg)
+    # The two phases are independent and each is retried by the next tick, so one
+    # failing must not skip the other. This matters most during a deployment
+    # roll: /execute is briefly unreachable, and a tick that died on the drain
+    # would also skip driving every in-flight run.
+    started, lines = 0, []
+    drain_error = watch_error = None
+    try:
+        started = drain(tracker, dispatcher, forgejo, loop_cfg, cfg)
+    except Exception as exc:  # noqa: BLE001 - a tick reports and moves on
+        drain_error = exc
+        log.warning("tick: drain failed (%s) — the next tick retries", exc)
+    try:
+        lines = watch(forgejo, tracker, dispatcher, notifier, loop_cfg, cfg)
+    except Exception as exc:  # noqa: BLE001
+        watch_error = exc
+        log.warning("tick: watch failed (%s) — the next tick retries", exc)
+
     log.info("tick: %d dispatched, %d in flight%s", started, len(lines),
              (" — " + "; ".join(lines)) if lines else "")
+
+    # Non-zero only when NOTHING worked: a half-successful tick is a normal
+    # transient (a rolling pod), and marking the job Failed for it buries the
+    # real failures in noise.
+    if drain_error is not None and watch_error is not None:
+        log.error("tick: both phases failed — drain=%s watch=%s", drain_error, watch_error)
+        return 1
     return 0
 
 

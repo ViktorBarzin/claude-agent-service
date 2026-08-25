@@ -357,3 +357,46 @@ def test_the_afk_wording_is_unchanged_when_no_labels_are_passed():
     from app.afk.types import Phase
     body = render(Phase.GREEN, {"repo": "x", "issue": 1, "thread_id": "j"})
     assert "TDD red" in body
+
+
+# --------------------------------------------------------------------------- #
+# A tick during a deployment roll: /execute is briefly unreachable.
+# --------------------------------------------------------------------------- #
+def test_a_failing_drain_does_not_skip_driving_in_flight_runs(monkeypatch):
+    """Observed live: a tick died on the drain while the pod was rolling, so
+    every in-flight run went undriven for that interval."""
+    watched = []
+    monkeypatch.setenv("AFK_KILL_SWITCH", "false")
+    monkeypatch.setenv("AFK_ALLOWLIST", "infra")
+    monkeypatch.setenv("FIXER_FORGEJO_TOKEN", "t")
+    monkeypatch.setattr(tick, "build", lambda *a, **k: (None, None, None, None))
+
+    def boom(*a, **k):
+        raise ConnectionRefusedError("connection refused")
+
+    monkeypatch.setattr(tick, "drain", boom)
+    monkeypatch.setattr(tick, "watch", lambda *a, **k: watched.append(1) or ["infra#9: wait"])
+    assert tick.main([]) == 0
+    assert watched == [1]
+
+
+def test_a_tick_fails_only_when_both_phases_fail(monkeypatch):
+    monkeypatch.setenv("AFK_KILL_SWITCH", "false")
+    monkeypatch.setenv("AFK_ALLOWLIST", "infra")
+    monkeypatch.setenv("FIXER_FORGEJO_TOKEN", "t")
+    monkeypatch.setattr(tick, "build", lambda *a, **k: (None, None, None, None))
+
+    def boom(*a, **k):
+        raise ConnectionRefusedError("connection refused")
+
+    monkeypatch.setattr(tick, "drain", boom)
+    monkeypatch.setattr(tick, "watch", boom)
+    assert tick.main([]) == 1
+
+
+def test_the_kill_switch_makes_a_tick_do_nothing(monkeypatch):
+    monkeypatch.setenv("AFK_KILL_SWITCH", "true")
+    called = []
+    monkeypatch.setattr(tick, "build", lambda *a, **k: called.append(1))
+    assert tick.main([]) == 0
+    assert called == []
