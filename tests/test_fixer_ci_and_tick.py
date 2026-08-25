@@ -245,13 +245,14 @@ def test_a_green_pipeline_closes_the_issue(monkeypatch):
     assert notifier.sent == ["done"]
 
 
-def test_the_commit_is_read_from_the_runs_prose_not_only_the_footer(monkeypatch):
-    """A run states its sha in a comment; that is what the watcher follows."""
+def test_the_commit_comes_from_the_runs_explicit_marker(monkeypatch):
+    """A run DECLARES what it pushed; that declaration is what the watcher
+    follows. Prose is not read, because image tags and job ids are hex too."""
     f = StubForgejo()
     f.issues["agent-in-progress"] = [{"number": 9, "labels": [{"name": "broken"}]}]
     f.comments[9] = [
         {"body": render_comment("investigating", RunRecord("job-1", 1.0))},
-        {"body": "Resolved: increased the memory limit. Commit `9f8e7d6c5b4a`."},
+        {"body": "Resolved: increased the memory limit.\n\nPushed-Commit: 9f8e7d6c5b4a"},
     ]
     seen: list[str] = []
 

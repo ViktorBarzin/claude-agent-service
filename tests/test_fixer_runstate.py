@@ -141,35 +141,63 @@ def test_elapsed_seconds_never_goes_negative():
 
 
 # --------------------------------------------------------------------------- #
-# find_pushed_commit — the job id is hex and must not read as a commit.
+# find_pushed_commit — ONLY an explicit marker counts.
 # --------------------------------------------------------------------------- #
-def test_find_pushed_commit_reads_a_sha_from_prose():
+def test_an_explicit_marker_is_read():
     from app.fixer.runstate import find_pushed_commit
-    assert find_pushed_commit(["Pushed `9f8e7d6c5b4a` — raises the limit."]) == "9f8e7d6c5b4a"
+    assert find_pushed_commit(["Pushed-Commit: 9f8e7d6c5b4a"]) == "9f8e7d6c5b4a"
 
 
-def test_find_pushed_commit_is_none_before_anything_is_pushed():
+def test_a_backticked_marker_is_read():
     from app.fixer.runstate import find_pushed_commit
-    assert find_pushed_commit(["Investigating.", "Still looking."]) is None
+    assert find_pushed_commit(["Pushed-Commit: `abc1234`"]) == "abc1234"
 
 
-def test_the_runs_own_job_id_is_not_a_commit():
-    """Regression: a 12-hex job id in the run's own comment read as a push, so a
-    dead run waited on CI for a commit that never existed."""
+def test_the_marker_is_found_amid_surrounding_prose():
+    from app.fixer.runstate import find_pushed_commit
+    body = ("**Resolved:** raised the gunicorn timeout.\n\n"
+            "Pushed-Commit: 1234abcdef01\n\n"
+            "Re-checked the symptom: /healthz answers in 40ms.")
+    assert find_pushed_commit([body]) == "1234abcdef01"
+
+
+def test_the_marker_must_be_on_its_own_line():
+    """Line-anchored so a sha mentioned mid-sentence is never mistaken for a
+    declaration — the whole point of requiring a marker."""
+    from app.fixer.runstate import find_pushed_commit
+    assert find_pushed_commit(["I would have used Pushed-Commit: abc1234 here"]) is None
+
+
+def test_a_later_marker_supersedes_an_earlier_one():
+    from app.fixer.runstate import find_pushed_commit
+    assert find_pushed_commit([
+        "Pushed-Commit: aaaaaaa",
+        "CI was red, corrected it.\n\nPushed-Commit: bbbbbbb",
+    ]) == "bbbbbbb"
+
+
+def test_prose_alone_is_never_a_commit():
+    """Regression: loose hex matching read an IMAGE TAG as a pushed commit, so a
+    run that changed nothing showed as pushed and waited on CI forever."""
+    from app.fixer.runstate import find_pushed_commit
+    assert find_pushed_commit([
+        "Verified live on the current image (`b0ef3eca`) — no code change warranted.",
+        "Pushed abc1234 for this",
+        "commit deadbeef1234",
+    ]) is None
+
+
+def test_a_job_id_in_prose_is_never_a_commit():
+    """Regression: job ids are 12 hex characters and every run prints its own."""
     from app.fixer.runstate import find_pushed_commit
     bodies = [render_comment("Picked this up.\n\n_Fixer run `e91bc819f056`._",
                              make_record(job_id="e91bc819f056"))]
-    assert find_pushed_commit(bodies, exclude={"e91bc819f056"}) is None
+    assert find_pushed_commit(bodies) is None
 
 
-def test_a_real_sha_still_wins_over_an_excluded_job_id():
+def test_no_marker_means_not_pushed_which_escalates_rather_than_hangs():
     from app.fixer.runstate import find_pushed_commit
-    bodies = [
-        render_comment("Picked this up.\n\n_Fixer run `e91bc819f056`._",
-                       make_record(job_id="e91bc819f056")),
-        "Pushed `abc1234` — bumps the memory limit.",
-    ]
-    assert find_pushed_commit(bodies, exclude={"e91bc819f056"}) == "abc1234"
+    assert find_pushed_commit(["Investigating.", "Still looking."]) is None
 
 
 def test_the_footer_is_never_a_commit_source():
@@ -179,31 +207,15 @@ def test_the_footer_is_never_a_commit_source():
     assert find_pushed_commit([body]) is None
 
 
-def test_every_job_id_in_the_thread_is_collected():
-    """Regression: excluding only the CURRENT run's job id left the previous
-    run's id in the thread readable as a pushed commit."""
-    from app.fixer.runstate import all_job_ids, find_pushed_commit
+def test_an_excluded_value_is_refused_even_when_declared():
+    from app.fixer.runstate import find_pushed_commit
+    assert find_pushed_commit(["Pushed-Commit: abc1234"], exclude={"abc1234"}) is None
+
+
+def test_all_job_ids_still_collects_every_footer_id():
+    from app.fixer.runstate import all_job_ids
     thread = [
-        render_comment("Picked this up.\n\n_Fixer run `e91bc819f056`._",
-                       make_record(job_id="e91bc819f056")),
-        "viktor: any luck?",
-        render_comment("Picked this up.\n\n_Fixer run `35af11b495cb`._",
-                       make_record(job_id="35af11b495cb")),
+        render_comment("one", make_record(job_id="e91bc819f056")),
+        render_comment("two", make_record(job_id="35af11b495cb")),
     ]
     assert all_job_ids(thread) == {"e91bc819f056", "35af11b495cb"}
-    assert find_pushed_commit(thread, exclude=all_job_ids(thread)) is None
-
-
-def test_all_job_ids_on_a_thread_with_no_footers_is_empty():
-    from app.fixer.runstate import all_job_ids
-    assert all_job_ids(["emo: broken", "viktor: looking"]) == set()
-
-
-def test_a_real_push_is_still_found_amid_several_job_ids():
-    from app.fixer.runstate import all_job_ids, find_pushed_commit
-    thread = [
-        render_comment("run one.\n\n_Fixer run `aaaaaaaaaaaa`._", make_record(job_id="aaaaaaaaaaaa")),
-        render_comment("run two.\n\n_Fixer run `bbbbbbbbbbbb`._", make_record(job_id="bbbbbbbbbbbb")),
-        "Pushed `1234abc` — raises the gunicorn timeout.",
-    ]
-    assert find_pushed_commit(thread, exclude=all_job_ids(thread)) == "1234abc"

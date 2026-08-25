@@ -125,44 +125,38 @@ def latest_record(comment_bodies: list[str]) -> RunRecord | None:
     return None
 
 
-#: A git sha as an agent writes it in prose — 7 to 40 hex chars, on a word
-#: boundary so ordinary words never match. Deliberately not anchored to a
-#: sentence shape: runs phrase it differently every time ("pushed abc1234",
-#: "commit `abc1234`", "landed as abc1234").
-_SHA_RE = re.compile(r"\b([0-9a-f]{7,40})\b")
-
-# Words that are all hex characters and would otherwise read as a sha. Short
-# enough to be plausible in prose, so they are excluded by name rather than by
-# a cleverer pattern.
-_SHA_FALSE_FRIENDS = frozenset({
-    "deadbeef", "cafebabe", "accede", "decade", "defaced", "effaced", "facade",
-})
+#: The explicit marker a run uses to declare what it pushed. Required, and the
+#: ONLY thing read as a commit — see :func:`find_pushed_commit`.
+_MARKER_RE = re.compile(r"^\s*Pushed-Commit:\s*`?([0-9a-f]{7,40})`?\s*$",
+                        re.IGNORECASE | re.MULTILINE)
 
 
 def find_pushed_commit(
     comment_bodies: list[str], exclude: frozenset[str] | set[str] = frozenset()
 ) -> str | None:
-    """The most recent commit sha mentioned across ``comment_bodies``.
+    """The commit a run declared it pushed, or ``None`` if it declared none.
 
-    A fixer run states the sha it pushed in a comment, and this is what turns
-    that prose into the ``commit`` the state machine needs. Later mentions win,
-    so a fix-forward turn's sha supersedes the one before it.
+    Only an explicit ``Pushed-Commit: <sha>`` line counts. Inferring a sha from
+    prose was tried first and is not viable: hex strings of commit length are
+    everywhere in a real report — a run's own 12-character job id, a container
+    image tag (``b0ef3eca``), a digest fragment — and every false positive makes
+    a run that pushed nothing look pushed, after which the state machine waits
+    forever on CI for a commit that does not exist.
 
-    ``exclude`` is for identifiers that are hex but are not commits — above all
-    the run's own JOB ID, which is 12 hex characters and appears in the run's
-    first comment ("Fixer run `e91bc819f056`"). Without it, a run that has pushed
-    nothing reads as pushed, and the state machine waits on CI for a commit that
-    does not exist instead of noticing the run died.
+    A run that pushed but omitted the marker therefore reads as not-pushed, which
+    escalates to a human rather than hanging. That is the safe direction: a
+    missing marker costs one notification, a phantom commit costs a stuck run.
 
-    Returns ``None`` when nothing looks like a sha, which is the correct reading
-    of "the run has not pushed yet".
+    Later declarations win, so a fix-forward turn's sha supersedes the one before
+    it. ``exclude`` remains available for a value that must never be treated as a
+    commit even if declared.
     """
-    skip = _SHA_FALSE_FRIENDS | {str(x) for x in exclude}
+    skip = {str(x) for x in exclude}
     for body in reversed(comment_bodies or []):
         # Skip the hidden footer: it carries the job id and any recorded commit,
         # and reading those back here would make the extraction circular.
         visible = _FOOTER_RE.sub("", body or "")
-        matches = [m for m in _SHA_RE.findall(visible) if m not in skip]
+        matches = [m for m in _MARKER_RE.findall(visible) if m not in skip]
         if matches:
-            return matches[-1]
+            return matches[-1].lower()
     return None
