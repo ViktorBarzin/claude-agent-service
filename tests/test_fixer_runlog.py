@@ -150,3 +150,26 @@ def test_the_summary_record_lands_in_the_file(tmp_path):
     assert last["status"] == "completed" and last["pushed"] is True
     assert last["stderr_tail"] == "a warning"
     assert "duration_s" in last
+
+
+def test_a_failure_is_attributed_to_the_tool_that_failed():
+    """Regression: tool_result carries only an id, so every failure was filed
+    under 'tool' and the summary could not answer which tool keeps failing."""
+    lines = [
+        json.dumps({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "kubectl get x"}}]}}),
+        json.dumps({"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "t1", "is_error": True}]}}),
+        json.dumps({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "t2", "name": "Read", "input": {}}]}}),
+        json.dumps({"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "t2", "is_error": True}]}}),
+    ]
+    s = summarise(lines)
+    assert s["tool_errors"] == {"Bash": 1, "Read": 1}
+
+
+def test_an_unmatched_result_id_still_counts():
+    lines = [json.dumps({"type": "user", "message": {"content": [
+        {"type": "tool_result", "tool_use_id": "gone", "is_error": True}]}})]
+    assert summarise(lines)["tool_error_total"] == 1

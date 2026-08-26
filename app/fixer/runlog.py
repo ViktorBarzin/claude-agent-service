@@ -140,6 +140,10 @@ def summarise(lines: list[str]) -> dict:
     """
     tools: Counter = Counter()
     tool_errors: Counter = Counter()
+    # tool_use id -> name. A tool_result carries only the id, so without this
+    # every failure is filed under "tool" and the question the summary exists to
+    # answer — WHICH tool keeps failing — cannot be asked.
+    name_by_id: dict[str, str] = {}
     turns = 0
     result_text = ""
     cost_usd = None
@@ -160,6 +164,8 @@ def summarise(lines: list[str]) -> dict:
                 if isinstance(block, dict) and block.get("type") == "tool_use":
                     name = str(block.get("name") or "?")
                     tools[name] += 1
+                    if block.get("id"):
+                        name_by_id[str(block["id"])] = name
                     if name == "Bash":
                         command = str((block.get("input") or {}).get("command") or "")
                         if "git push" in command:
@@ -168,7 +174,9 @@ def summarise(lines: list[str]) -> dict:
             for block in (event.get("message") or {}).get("content") or []:
                 if isinstance(block, dict) and block.get("type") == "tool_result":
                     if block.get("is_error"):
-                        tool_errors[str(block.get("name") or "tool")] += 1
+                        which = name_by_id.get(str(block.get("tool_use_id") or ""),
+                                               str(block.get("name") or "tool"))
+                        tool_errors[which] += 1
                         error_lines += 1
         elif etype == "result":
             result_text = str(event.get("result") or "")[:2000]
