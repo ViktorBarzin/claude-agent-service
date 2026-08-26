@@ -372,3 +372,42 @@ def test_full_eligibility_matrix(
     assert (len(decisions) == 1) is should_dispatch
     if should_dispatch:
         assert decisions[0].issue is issue
+
+
+# --------------------------------------------------------------------------- #
+# The escalation gate — an issue handed to a human leaves the queue.
+# --------------------------------------------------------------------------- #
+def test_an_escalated_issue_is_not_dispatched(make_issue, make_config):
+    """Regression, observed live 2026-08-26: a run escalated infra#55, which
+    removed the in-progress lock but LEFT the ready label on the issue — so the
+    next tick re-dispatched the very thing it had just given up on."""
+    cfg = make_config(allowlist=["infra"], kill_switch=False)
+    escalated = make_issue(number=55, repo="infra", labels=["broken", cfg.human_label])
+    assert dispatch_policy.select_dispatchable([escalated], cfg, set()) == []
+
+
+def test_the_escalation_gate_precedes_every_other_gate(make_issue, make_config):
+    """It is checked first because every other gate would pass: the lock is gone
+    and the ready label is still there."""
+    cfg = make_config(allowlist=["infra"], kill_switch=False)
+    issue = make_issue(number=55, repo="infra", labels=["broken", cfg.human_label])
+    assert dispatch_policy.select_dispatchable([issue], cfg, set()) == []
+
+
+def test_a_sibling_issue_is_still_dispatched_while_one_is_escalated(
+    make_issue, make_config
+):
+    """Escalating one issue must not freeze the repo for everything else."""
+    cfg = make_config(allowlist=["infra"], kill_switch=False)
+    escalated = make_issue(number=55, repo="infra", labels=["broken", cfg.human_label])
+    fresh = make_issue(number=56, repo="infra", labels=["broken"])
+    picked = dispatch_policy.select_dispatchable([escalated, fresh], cfg, set())
+    assert [d.issue.number for d in picked] == [56]
+
+
+def test_clearing_the_human_label_puts_it_back_in_the_queue(make_issue, make_config):
+    """A person taking the label off is how an escalated issue is re-armed."""
+    cfg = make_config(allowlist=["infra"], kill_switch=False)
+    reopened = make_issue(number=55, repo="infra", labels=["broken"])
+    assert [d.issue.number
+            for d in dispatch_policy.select_dispatchable([reopened], cfg, set())] == [55]

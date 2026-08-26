@@ -111,6 +111,11 @@ class Config:
     kill_switch: bool
     in_progress_label: str = "agent-in-progress"
     ready_label: str = "ready-for-agent"
+    # An issue handed to a human is OUT of the loop's queue until a person takes
+    # the label off. Without this the escalation is not terminal: the ready label
+    # is still on the issue and the in-progress lock was released on the way out,
+    # so the very next tick re-dispatches it, forever.
+    human_label: str = "ready-for-human"
     budget_usd: float = 100.0
     fix_forward_max_attempts: int = 5
     fix_forward_max_seconds: int = 3600

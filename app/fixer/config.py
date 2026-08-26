@@ -165,4 +165,6 @@ def loop_config(env: Mapping[str, str] | None = None) -> AfkConfig:
         attempts = UNBOUNDED
     if not (e.get(afk_config.ENV_FIX_FORWARD_MAX_SECONDS) or "").strip():
         seconds = UNBOUNDED
-    return replace(base, fix_forward_max_attempts=attempts, fix_forward_max_seconds=seconds)
+    return replace(base, fix_forward_max_attempts=attempts,
+                   fix_forward_max_seconds=seconds,
+                   human_label=from_env(e).human_label)

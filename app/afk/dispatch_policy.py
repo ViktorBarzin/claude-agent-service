@@ -66,7 +66,7 @@ def select_dispatchable(
     eligible: list[Issue] = [
         issue
         for issue in issues
-        if _is_eligible(issue, allowlist, in_flight_repos)
+        if _is_eligible(issue, allowlist, in_flight_repos, config.human_label)
     ]
 
     # One slot per repo: among the eligible issues sharing a repo, the best
@@ -87,10 +87,16 @@ def _is_eligible(
     issue: Issue,
     allowlist: frozenset[str],
     in_flight_repos: set[str],
+    human_label: str = "ready-for-human",
 ) -> bool:
-    """True iff the issue clears the trust, allowlist, per-repo-lock, and
-    blocked_by gates. Kept boolean (not "which gate failed") because the policy
-    only ever needs the survivors; reasons are attached to survivors only."""
+    """True iff the issue clears the escalation, trust, allowlist, per-repo-lock,
+    and blocked_by gates. Kept boolean (not "which gate failed") because the
+    policy only ever needs the survivors; reasons are attached to survivors only."""
+    # Escalated: a human owns it now. Checked FIRST because an escalated issue
+    # still carries the ready label and no longer holds the lock, so every other
+    # gate would pass and the loop would re-dispatch what it just gave up on.
+    if human_label and human_label in issue.labels:
+        return False
     if not issue.labeled_by_trusted:
         return False
     if issue.repo not in allowlist:
