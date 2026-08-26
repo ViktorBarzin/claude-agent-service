@@ -37,12 +37,23 @@ FetchFn = Callable[[str], dict | None]
 STATE_RUNNING = "running"
 STATE_COMPLETED = "completed"
 STATE_ERRORED = "errored"
+#: "I could not find out." The watcher does not recognise this string, so it
+#: reads as "no status yet" and WAITs — which is the only safe reading when the
+#: runner was momentarily unreachable. Distinct from ERRORED, which asserts the
+#: run is dead; asserting that on a network blip escalates a healthy run.
+STATE_UNKNOWN = "unknown"
+
+#: What a fetch returns when the runner could not be reached at all, as opposed
+#: to answering "no such job". The two are NOT the same and conflating them was
+#: a real defect: a live run got escalated two minutes in.
+UNREACHABLE = {"status": "__unreachable__"}
 
 #: How a ``/execute`` job status reads as a turn state. Anything absent from
 #: this map — including a status a future version adds — folds to ``errored``
 #: rather than to "still running", so an unrecognised terminal state escalates
 #: instead of hanging.
 _TURN_STATE_BY_JOB_STATUS = {
+    "__unreachable__": STATE_UNKNOWN,
     "queued": STATE_RUNNING,
     "running": STATE_RUNNING,
     "completed": STATE_COMPLETED,

@@ -20,6 +20,7 @@ import logging
 import os
 import sys
 import time
+import urllib.error
 import urllib.request
 
 from app.afk.ci_watcher import StageResult  # noqa: F401  (documents the CI contract)
@@ -32,7 +33,7 @@ from app.afk.watcher import InFlightRun, Watcher
 from app.fixer import config as fixer_config
 from app.fixer import ntfy, prompts
 from app.fixer.checklist_tracker import ChecklistCollapsingTracker
-from app.fixer.execute_client import ExecuteClient
+from app.fixer.execute_client import UNREACHABLE, ExecuteClient
 from app.fixer.forgejo import ForgejoClient
 from app.fixer.runstate import (
     RunRecord,
@@ -80,12 +81,25 @@ class ServiceJobs:
         return str(self._call("POST", "/execute", payload).get("job_id") or "")
 
     def fetch(self, job_id: str) -> dict | None:
+        """The job record, ``None`` if the runner has never heard of it, or
+        ``UNREACHABLE`` if we could not ask.
+
+        The distinction is the whole point. A 404 is an assertion — the runner is
+        up and does not know this job, so the run is gone and should escalate.
+        Anything else (connection refused mid-roll, a timeout, a 5xx) means we
+        failed to ask, which says nothing about the run; treating that as death
+        escalated a run that was two minutes into working.
+        """
         try:
             return self._call("GET", f"/jobs/{job_id}")
-        except Exception:
-            # A 404 means the runner has forgotten the job — which the adapter
-            # reads as errored, escalating a run nobody is driving.
-            return None
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                return None
+            log.warning("job fetch %s -> HTTP %s (treating as unknown)", job_id, exc.code)
+            return dict(UNREACHABLE)
+        except Exception as exc:  # noqa: BLE001 - any transport failure
+            log.warning("job fetch %s unreachable (%s)", job_id, exc)
+            return dict(UNREACHABLE)
 
 
 class FixerDispatcher:
@@ -191,7 +205,14 @@ def watch(forgejo, tracker, dispatcher, notifier, loop_cfg: Config, cfg) -> list
                 fix_forward_attempts=record.fix_forward_attempts,
                 elapsed_seconds=record.elapsed_seconds(time.time()),
             )
+            observed = dispatcher.snapshot()
+            state = next((t.get("latestTurn", {}).get("state")
+                          for t in observed.get("threads", [])
+                          if t.get("id") == record.job_id), None)
             result = watcher.tick(run, loop_cfg)
+            log.info("watch %s#%s: job=%s turn=%s commit=%s attempts=%d -> %s",
+                     repo, number, record.job_id, state, commit,
+                     record.fix_forward_attempts, result.action.value)
             _persist(forgejo, repo, number, record, result, commit)
             lines.append(f"{repo}#{number}: {result.action.value}")
     return lines

@@ -174,3 +174,46 @@ def test_snapshot_reports_several_runs_independently():
     client.track("b")
     states = {t["id"]: t["latestTurn"]["state"] for t in client.snapshot()["threads"]}
     assert states == {"a": "running", "b": "completed"}
+
+
+# --------------------------------------------------------------------------- #
+# Unreachable runner vs dead run — conflating them escalated a live run.
+# --------------------------------------------------------------------------- #
+def test_an_unreachable_runner_reads_as_unknown_not_errored():
+    """Regression (infra#56, 2026-08-26): a run two minutes into working was
+    escalated because a failed fetch was reported as a dead run."""
+    from app.fixer.execute_client import STATE_UNKNOWN, UNREACHABLE
+    client = ExecuteClient(lambda p: "job-1", lambda j: dict(UNREACHABLE))
+    client.track("job-1")
+    assert client.turn_state("job-1") == STATE_UNKNOWN
+
+
+def test_an_unknown_turn_state_makes_the_watcher_wait(
+    fake_tracker, fake_ci, fake_notifier
+):
+    """The watcher does not recognise 'unknown', which is exactly right: an
+    unrecognised state means 'no status yet', and that WAITs."""
+    from app.fixer.execute_client import UNREACHABLE
+    client = ExecuteClient(lambda p: "job-1", lambda j: dict(UNREACHABLE))
+    client.track("job-1")
+    run = InFlightRun(
+        issue=Issue(number=56, repo="infra", labels=["broken"], blocked_by=[],
+                    labeled_by_trusted=True, priority=1),
+        thread_id="job-1", commit=None,
+    )
+    result = _watcher_tick(client, fake_tracker, fake_ci, fake_notifier, run)
+    assert result.action is Action.WAIT
+    assert ("add", "infra", 56, "needs-human") not in fake_tracker.label_ops
+
+
+def test_a_genuinely_unknown_job_still_escalates(fake_tracker, fake_ci, fake_notifier):
+    """The runner answering 'no such job' IS an assertion the run is gone."""
+    client = ExecuteClient(lambda p: "job-1", lambda j: None)
+    client.track("job-1")
+    run = InFlightRun(
+        issue=Issue(number=56, repo="infra", labels=["broken"], blocked_by=[],
+                    labeled_by_trusted=True, priority=1),
+        thread_id="job-1", commit=None,
+    )
+    result = _watcher_tick(client, fake_tracker, fake_ci, fake_notifier, run)
+    assert result.action is Action.ESCALATE_PREPUSH
