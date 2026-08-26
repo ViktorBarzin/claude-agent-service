@@ -1,5 +1,15 @@
 FROM alpine:3.20
 
+# The homelab CLI, from its own published image. Without it the agent reaches for
+# `kubectl logs` on one pod when `homelab logs query` would search every service
+# cluster-wide over 30 days in Loki, and it has no way to record or recall a
+# durable learning between runs — each run starts blind. Both are things every
+# human session on this box takes for granted.
+#
+# Both images are alpine-based, so the musl binary runs as-is; the CLI is built
+# CGO-free in golang:alpine.
+COPY --from=ghcr.io/viktorbarzin/infra-cli:latest /app/infra_cli /usr/local/bin/homelab
+
 ARG TERRAFORM_VERSION=1.5.7
 ARG TERRAGRUNT_VERSION=0.99.4
 ARG SOPS_VERSION=3.9.4
