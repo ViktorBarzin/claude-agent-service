@@ -73,6 +73,9 @@ class ExecuteClient:
         # job the runner has forgotten. Process-local by design: a restart loses
         # the list and the runner has lost the job too, which is the same fact.
         self._dispatched: list[str] = []
+        # Set by the caller before dispatch so the run's log is named for the
+        # issue; empty is fine and the runner falls back to its own default.
+        self.label = ""
 
     def dispatch(self, repo: str, issue: int, prompt: str) -> str:
         """Start a run for ``repo#issue``; returns the job id.
@@ -82,7 +85,12 @@ class ExecuteClient:
         of the port's signature, so they are accepted and used only for the
         error message if submission fails.
         """
-        job_id = self._submit(prompt)
+        try:
+            job_id = self._submit(prompt, self.label or f"{repo}#{issue}")
+        except TypeError:
+            # A submit that takes only a prompt (older wiring, and the tests'
+            # simplest fake) still works — the label is a convenience.
+            job_id = self._submit(prompt)
         if not job_id:
             raise RuntimeError(f"dispatch for {repo}#{issue} returned no job id")
         self._dispatched.append(job_id)

@@ -52,13 +52,20 @@ def stub(monkeypatch):
 
 @pytest.fixture
 def submitted(monkeypatch):
-    calls: list[str] = []
+    class Recorder(list):
+        """A list of prompts that also remembers the issue label each carried."""
+        issues: list[str] = []
 
-    def submit(prompt: str) -> str:
+    calls = Recorder()
+    submitted_issues: list[str] = []
+
+    def submit(prompt: str, issue: str = "") -> str:
         calls.append(prompt)
+        submitted_issues.append(issue)
         return "job-77"
 
     receiver.set_submitter(submit)
+    calls.issues = submitted_issues
     yield calls
     receiver.set_submitter(None)
 
@@ -112,6 +119,13 @@ def test_a_signed_broken_label_dispatches_a_run(client, env, stub, submitted):
     assert len(submitted) == 1
 
 
+def test_the_run_is_labelled_with_its_issue(client, env, stub, submitted):
+    """The log file is named for the issue, so a transcript is findable by what
+    it was about rather than only by an opaque job id."""
+    post(client, payload())
+    assert submitted.issues == ["infra#42"]
+
+
 def test_the_prompt_names_the_issue_and_its_url(client, env, stub, submitted):
     post(client, payload())
     prompt = submitted[0]
@@ -131,7 +145,7 @@ def test_dispatch_takes_the_lock_and_says_so_on_the_issue(client, env, stub, sub
 
 def test_the_label_is_only_applied_after_a_successful_dispatch(client, env, stub, monkeypatch):
     """A submission that raises must not leave a phantom lock on the repo."""
-    def boom(prompt):
+    def boom(prompt, issue=""):
         raise RuntimeError("runner down")
 
     receiver.set_submitter(boom)

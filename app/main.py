@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 from app import conversational
 from app.fixer import config as fixer_config
 from app.fixer import receiver as fixer_receiver
+from app.fixer.runlog import RunLog
 
 app = FastAPI(title="Claude Agent Service")
 
@@ -259,6 +260,7 @@ async def _invoke_claude_subprocess(
     max_budget_usd: float | None,
     workspace: str,
     model: str | None = None,
+    sink=None,
 ) -> dict[str, Any]:
     """Run the claude CLI once in `workspace` and return a result dict.
 
@@ -270,12 +272,17 @@ async def _invoke_claude_subprocess(
     overrides whatever `model:` is set in the agent's frontmatter so the
     OpenAI-compat path can pick Haiku/Sonnet/Opus per-request.
     """
+    # With a sink we ask for the EVENT STREAM rather than one final blob: the
+    # point of the log is what happened during the run, and `json` only ever
+    # tells us how it ended. The chat paths pass no sink and are unaffected.
     cmd = [
         "claude", "-p",
         "--agent", agent,
         "--dangerously-skip-permissions",
-        "--output-format", "json",
+        "--output-format", "stream-json" if sink is not None else "json",
     ]
+    if sink is not None:
+        cmd.append("--verbose")  # stream-json requires it
     # A budget of None means "no ceiling": omit the flag rather than passing a
     # sentinel, so the CLI applies none at all.
     if max_budget_usd is not None:
@@ -295,7 +302,15 @@ async def _invoke_claude_subprocess(
     assert proc.stdout is not None and proc.stderr is not None
     output_lines: list[str] = []
     async for line in proc.stdout:
-        output_lines.append(line.decode())
+        text = line.decode()
+        output_lines.append(text)
+        if sink is not None:
+            # Written through as it arrives: a run killed mid-flight is exactly
+            # the one worth reading afterwards.
+            try:
+                sink(text)
+            except Exception:  # noqa: BLE001 - logging never fails a run
+                pass
 
     stderr = await proc.stderr.read()
     await proc.wait()
@@ -312,6 +327,11 @@ async def _run_execute_job(job_id: str, request: ExecuteRequest):
     agent in an isolated workspace. The timeout covers execution only, never
     the time spent waiting in the queue."""
     workspace = None
+    label = str((request.metadata or {}).get("issue") or (request.metadata or {}).get("source") or "run")
+    runlog = RunLog(job_id, label)
+    jobs[job_id]["runlog"] = runlog.path
+    runlog.event("start", agent=request.agent, label=label,
+                 prompt_head=request.prompt[:1500])
     try:
         async with _execution_slot():
             jobs[job_id]["status"] = "running"
@@ -320,6 +340,7 @@ async def _run_execute_job(job_id: str, request: ExecuteRequest):
             result = await asyncio.wait_for(
                 _invoke_claude_subprocess(
                     request.prompt, request.agent, request.max_budget_usd, workspace,
+                    sink=runlog.raw,
                 ),
                 timeout=request.timeout_seconds,
             )
@@ -345,6 +366,18 @@ async def _run_execute_job(job_id: str, request: ExecuteRequest):
             "finished_epoch": time.time(),
         })
     finally:
+        record = jobs.get(job_id) or {}
+        summary = runlog.finish(record.get("exit_code"), str(record.get("status")),
+                                str(record.get("stderr") or ""))
+        jobs[job_id]["summary"] = summary
+        # One compact line to stdout so the run is queryable in Loki without
+        # reaching for the volume: `homelab logs query`.
+        log_line = {"fixer_run": job_id, "label": label, **{
+            k: summary.get(k) for k in
+            ("status", "duration_s", "turns", "tool_call_total", "tool_error_total",
+             "pushed", "cost_usd")
+        }}
+        print("fixer-run " + json.dumps(log_line, default=str), flush=True)
         try:
             await cleanup_workspace(workspace)
         except Exception:
@@ -440,16 +473,20 @@ def start_job(request: ExecuteRequest) -> str:
     return job_id
 
 
-def _submit_fixer_job(prompt: str) -> str:
+def _submit_fixer_job(prompt: str, issue: str = "") -> str:
     """Start a fixer run. The agent and the (absent) ceilings come from config,
-    so the receiver never has to know how the runner is invoked."""
+    so the receiver never has to know how the runner is invoked.
+
+    ``issue`` names the run's log file, so a transcript is findable by the issue
+    it was for rather than only by an opaque job id.
+    """
     cfg = fixer_config.from_env()
     return start_job(ExecuteRequest(
         prompt=prompt,
         agent=cfg.agent,
         max_budget_usd=cfg.max_budget_usd,
         timeout_seconds=cfg.timeout_seconds,
-        metadata={"source": "fixer"},
+        metadata={"source": "fixer", "issue": issue},
     ))
 
 

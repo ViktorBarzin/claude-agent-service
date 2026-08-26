@@ -69,9 +69,9 @@ class ServiceJobs:
             raw = resp.read()
             return json.loads(raw) if raw else {}
 
-    def submit(self, prompt: str) -> str:
+    def submit(self, prompt: str, issue: str = "") -> str:
         payload: dict = {"prompt": prompt, "agent": self._agent,
-                         "metadata": {"source": "fixer-tick"}}
+                         "metadata": {"source": "fixer-tick", "issue": issue}}
         # Omit the ceilings entirely when unset, so the service's own optional
         # defaults apply rather than a value invented here.
         if self._cfg.max_budget_usd is not None:
@@ -118,6 +118,7 @@ class FixerDispatcher:
         self._cfg = cfg
 
     def dispatch(self, repo: str, issue: int, prompt: str) -> str:
+        self._inner.label = f"{repo}#{issue}"
         issue_obj = self._forgejo.get_issue(repo, issue)
         own = prompts.first_turn(
             owner=self._cfg.owner, repo=repo, number=issue,

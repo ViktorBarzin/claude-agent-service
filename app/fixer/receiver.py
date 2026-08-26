@@ -122,7 +122,7 @@ async def forgejo_hook(request: Request, response: Response) -> dict:
         response.status_code = 503
         return {"ok": False, "reason": "no-submitter"}
 
-    job_id = _submit(prompt)
+    job_id = _submit(prompt, f"{delivery.repo}#{delivery.number}")
     record = RunRecord(job_id=job_id, started_at=time.time())
 
     # Label AFTER a successful dispatch, so a submission that raises never leaves
