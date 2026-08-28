@@ -43,6 +43,13 @@ STATE_ERRORED = "errored"
 #: run is dead; asserting that on a network blip escalates a healthy run.
 STATE_UNKNOWN = "unknown"
 
+#: "The runner has no record of this job." Distinct from ERRORED, which asserts
+#: the turn itself failed. The common cause is the runner's own process being
+#: replaced mid-run — jobs live in an in-process dict — and that deserves a
+#: restart, not a page. Conflating the two escalated two drill runs whose only
+#: problem was an image update landing while they worked.
+STATE_VANISHED = "vanished"
+
 #: What a fetch returns when the runner could not be reached at all, as opposed
 #: to answering "no such job". The two are NOT the same and conflating them was
 #: a real defect: a live run got escalated two minutes in.
@@ -117,8 +124,14 @@ class ExecuteClient:
             self._dispatched.append(job_id)
 
     def turn_state(self, job_id: str) -> str:
-        """One job's status as a turn state, with unknown folding to errored."""
+        """One job's status as a turn state.
+
+        A status this map does not recognise folds to ``errored`` (an
+        unrecognised terminal state should escalate, not hang). "No such job"
+        is different and returns ``vanished``: the runner is not reporting a
+        failure, it has simply lost the record.
+        """
         record = self._fetch(job_id)
         if not record:
-            return STATE_ERRORED
+            return STATE_VANISHED
         return _TURN_STATE_BY_JOB_STATUS.get(str(record.get("status")), STATE_ERRORED)

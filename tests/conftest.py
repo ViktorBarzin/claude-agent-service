@@ -113,6 +113,7 @@ def make_run_state():
         pushed: bool = False,
         fix_forward_attempts: int = 0,
         elapsed_seconds: float = 0.0,
+        redispatch_attempts: int = 0,
     ) -> RunState:
         return RunState(
             thread_status=thread_status,
@@ -120,6 +121,7 @@ def make_run_state():
             pushed=pushed,
             fix_forward_attempts=fix_forward_attempts,
             elapsed_seconds=elapsed_seconds,
+            redispatch_attempts=redispatch_attempts,
         )
     return _make
 

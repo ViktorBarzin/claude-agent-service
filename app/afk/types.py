@@ -20,12 +20,20 @@ class ThreadStatus(Enum):
     """Liveness of a T3 thread, as projected from the orchestration snapshot.
 
     ``RUNNING`` — the agent is still working the turn; ``IDLE`` — the turn
-    finished cleanly (it has gone quiet); ``ERROR`` — the thread/turn failed.
+    finished cleanly (it has gone quiet); ``ERROR`` — the thread/turn failed;
+    ``VANISHED`` — the runner has no record of the job at all.
+
+    ``VANISHED`` is not a kind of ``ERROR``. ``ERROR`` is the runner asserting a
+    turn failed; ``VANISHED`` is the runner saying it never heard of the job,
+    which in practice means the process holding it was replaced (jobs live in an
+    in-process dict, so an image update mid-run takes them with it). The two want
+    opposite responses, which is why they are separate members.
     """
 
     RUNNING = "running"
     IDLE = "idle"
     ERROR = "error"
+    VANISHED = "vanished"
 
 
 class CIStatus(Enum):
@@ -58,7 +66,9 @@ class Action(Enum):
     CI passed, close the issue; ``ESCALATE_PREPUSH`` — the agent errored/stalled
     before pushing anything, hand back to a human; ``FIX_FORWARD`` — CI went red
     on a pushed commit, dispatch another corrective turn; ``FREEZE_ESCALATE`` —
-    fix-forward budget exhausted (attempts or wall-clock), stop and escalate.
+    fix-forward budget exhausted (attempts or wall-clock), stop and escalate;
+    ``REDISPATCH`` — the job is gone and nothing was pushed, so start the run
+    again from the issue.
     """
 
     WAIT = "wait"
@@ -66,6 +76,7 @@ class Action(Enum):
     ESCALATE_PREPUSH = "escalate_prepush"
     FIX_FORWARD = "fix_forward"
     FREEZE_ESCALATE = "freeze_escalate"
+    REDISPATCH = "redispatch"
 
 
 # --------------------------------------------------------------------------- #
@@ -119,6 +130,13 @@ class Config:
     budget_usd: float = 100.0
     fix_forward_max_attempts: int = 5
     fix_forward_max_seconds: int = 3600
+    # How many times a run may be restarted after its job goes missing. One is
+    # enough for the case this exists for — the runner's process being replaced
+    # mid-run — and a job that disappears a second time is telling us something
+    # a third identical attempt will not fix. Deliberately NOT part of the
+    # fix-forward budget, which the fixer leaves unbounded: that budget is for
+    # corrective work on a real commit, this one is for a lost turn.
+    max_redispatch_attempts: int = 1
 
 
 @dataclass
@@ -137,3 +155,8 @@ class RunState:
     pushed: bool
     fix_forward_attempts: int
     elapsed_seconds: float
+    #: How many times this run has already been restarted after its job went
+    #: missing. Separate from ``fix_forward_attempts``, which counts corrective
+    #: turns after a red pipeline — a lost job and a red build are different
+    #: failures and share no budget.
+    redispatch_attempts: int = 0

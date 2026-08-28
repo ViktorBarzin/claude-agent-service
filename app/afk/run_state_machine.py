@@ -24,10 +24,21 @@ The decision table (first match wins):
   * pushed AND CI red, budget exhausted         -> FREEZE_ESCALATE
       Out of fix-forward attempts or wall-clock; stop churning and hand to a
       human with the broken commit left in place.
+  * not pushed AND thread VANISHED,
+    redispatch budget remaining                 -> REDISPATCH
+      The runner has no record of the job, which is what a pod roll looks like
+      from here: jobs live in an in-process dict, so replacing the process loses
+      them. Nothing was pushed, so nothing is half-done and the run can simply
+      start again. Bounded by ``redispatch_attempts < max_redispatch_attempts``
+      (default 1) — a job that disappears twice is not a restart.
+  * not pushed AND thread VANISHED,
+    redispatch budget exhausted                 -> ESCALATE_PREPUSH
   * not pushed AND thread ERROR/IDLE            -> ESCALATE_PREPUSH
       The agent will never reach green: it errored, or its turn finished /
       stalled with nothing pushed. There is no pushed commit to fix forward, so
       escalate before-push (a different remediation path than FREEZE_ESCALATE).
+      ERROR is deliberately NOT re-dispatched: the runner is asserting the turn
+      failed, and an identical fresh turn has no particular reason to survive.
   * everything else                             -> WAIT
       Still in flight: working toward a first push (thread running / unknown), or
       pushed with CI not yet decided. Poll again next tick.
@@ -61,6 +72,17 @@ def next_action(state: RunState, config: Config) -> Action:
             )
         # CI pending / not yet reported -> wait for the verdict.
         return Action.WAIT
+
+    # Nothing pushed, and the runner has no record of the job: the process
+    # holding it was almost certainly replaced mid-run. Nothing is half-done, so
+    # start over rather than waking a human for a pod roll — bounded, because a
+    # second disappearance is evidence of something a restart will not fix.
+    if state.thread_status is ThreadStatus.VANISHED:
+        return (
+            Action.REDISPATCH
+            if state.redispatch_attempts < config.max_redispatch_attempts
+            else Action.ESCALATE_PREPUSH
+        )
 
     # Nothing pushed yet. If the turn is over (errored or gone idle) the run can
     # never reach green on its own -> escalate before-push; otherwise it is still

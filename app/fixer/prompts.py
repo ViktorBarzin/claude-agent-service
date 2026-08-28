@@ -59,6 +59,26 @@ what you tried — a human takes it from there with your commit left in place.
 """
 
 
+_REDISPATCH_TURN = """\
+Start again on Forgejo issue {owner}/{repo}#{number} ("{title}").
+
+A previous turn of yours was working this issue and was lost before it pushed
+anything — the process running it was replaced, which happens when the service
+is updated mid-run. Nothing it did survived and nothing is half-applied, so
+there is no cleanup to do and no commit of yours in flight.
+
+Read the issue and every comment first; anything the lost turn reported there
+still stands and is worth not rediscovering:
+  {issue_url}
+
+Then work it as a first attempt: diagnose, repair, and see the repair land.
+Follow the issue-responder playbook as usual.
+
+When you have pushed a commit, state its full sha in a comment. That is how the
+watcher knows what to follow through CI.
+"""
+
+
 def _format_notes(record: RunRecord | None) -> str:
     """The previous run's notes as a bullet list, or a plain statement of none."""
     if record is None or not record.notes:
@@ -73,6 +93,15 @@ def first_turn(
     return _FIRST_TURN.format(
         owner=owner, repo=repo, number=number, title=title,
         issue_url=issue_url, trigger_label=trigger_label,
+    )
+
+
+def redispatch_turn(
+    *, owner: str, repo: str, number: int, title: str, issue_url: str
+) -> str:
+    """The dispatch prompt for a run restarted after its job went missing."""
+    return _REDISPATCH_TURN.format(
+        owner=owner, repo=repo, number=number, title=title, issue_url=issue_url,
     )
 
 

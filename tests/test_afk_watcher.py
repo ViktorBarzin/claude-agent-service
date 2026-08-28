@@ -28,7 +28,7 @@ import pytest
 
 from app.afk import watcher
 from app.afk.notifier import KIND_DONE, KIND_FROZEN, KIND_NEEDS_HUMAN
-from app.afk.types import CIStatus, Issue
+from app.afk.types import Action, CIStatus, Issue
 
 
 # --------------------------------------------------------------------------- #
@@ -401,3 +401,75 @@ def test_ready_for_human_label_is_configurable(
     )
     w.tick(_run(issue, commit=None), make_config())
     assert ("add", "infra", 7, "needs-eyes") in _labels(fake_tracker)
+
+
+# --------------------------------------------------------------------------- #
+# Dispatch-kind negotiation.
+#
+# The watcher tells the dispatcher what kind of turn it is asking for, so a
+# one-shot run gets a prompt that matches its situation. Ports that predate the
+# argument still work. The negotiation reads the signature rather than catching
+# TypeError, because a TypeError from INSIDE a kind-aware dispatcher would
+# otherwise be retried without the kind — sending a first-turn prompt to a run
+# that is mid-chain, which is what the argument exists to prevent.
+# --------------------------------------------------------------------------- #
+def test_a_kind_aware_port_is_told_the_kind(
+    fake_tracker, fake_ci, fake_notifier, make_issue, make_config
+):
+    seen: list[dict] = []
+
+    class KindAware:
+        def dispatch(self, repo, issue, prompt, *, kind="first"):
+            seen.append({"kind": kind, "prompt": prompt})
+            return "thread-new"
+
+        def snapshot(self):
+            return _snapshot("thread-0", "vanished")
+
+    issue = make_issue(number=5, repo="infra")
+    w = _watcher(KindAware(), fake_tracker, fake_ci, fake_notifier)
+    result = w.tick(_run(issue), make_config())
+
+    assert result.action is Action.REDISPATCH
+    assert seen and seen[0]["kind"] == "redispatch"
+
+
+def test_a_type_error_from_inside_dispatch_is_not_retried_without_the_kind(
+    fake_tracker, fake_ci, fake_notifier, make_issue, make_config
+):
+    calls: list[str] = []
+
+    class Exploding:
+        def dispatch(self, repo, issue, prompt, *, kind="first"):
+            calls.append(kind)
+            raise TypeError("something inside the dispatcher, not the signature")
+
+        def snapshot(self):
+            return _snapshot("thread-0", "vanished")
+
+    issue = make_issue(number=5, repo="infra")
+    w = _watcher(Exploding(), fake_tracker, fake_ci, fake_notifier)
+    with pytest.raises(TypeError):
+        w.tick(_run(issue), make_config())
+    assert calls == ["redispatch"]  # exactly one attempt, kind intact
+
+
+def test_a_legacy_port_without_kind_still_dispatches(
+    fake_tracker, fake_ci, fake_notifier, make_issue, make_config
+):
+    seen: list[str] = []
+
+    class Legacy:
+        def dispatch(self, repo, issue, prompt):
+            seen.append(prompt)
+            return "thread-new"
+
+        def snapshot(self):
+            return _snapshot("thread-0", "vanished")
+
+    issue = make_issue(number=5, repo="infra")
+    w = _watcher(Legacy(), fake_tracker, fake_ci, fake_notifier)
+    result = w.tick(_run(issue), make_config())
+
+    assert result.action is Action.REDISPATCH
+    assert seen and "lost" in seen[0].lower()

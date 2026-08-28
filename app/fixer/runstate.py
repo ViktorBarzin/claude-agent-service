@@ -44,6 +44,9 @@ class RunRecord:
     started_at: float
     commit: str | None = None
     fix_forward_attempts: int = 0
+    #: Restarts spent after the runner lost the job (a replaced process, not a
+    #: failed turn). Its own budget, separate from ``fix_forward_attempts``.
+    redispatch_attempts: int = 0
     chain_parent: int | None = None
     # Free-form notes a run leaves for its successor. Bounded by convention, not
     # by code: this is a hint channel, not a log.
@@ -90,6 +93,9 @@ def parse_footer(body: str) -> RunRecord | None:
             started_at=float(data.get("started_at") or 0.0),
             commit=(str(data["commit"]) if data.get("commit") else None),
             fix_forward_attempts=int(data.get("fix_forward_attempts") or 0),
+            # Absent in footers written before this field existed, which a run
+            # in flight across the upgrade will have; 0 is the right reading.
+            redispatch_attempts=int(data.get("redispatch_attempts") or 0),
             chain_parent=(int(data["chain_parent"]) if data.get("chain_parent") else None),
             notes=[str(n) for n in (data.get("notes") or [])],
         )

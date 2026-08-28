@@ -43,6 +43,8 @@ DISABLED BY DEFAULT applies transitively: the poller never starts a run while
 the loop is off (``config.kill_switch`` / empty allowlist — see ``config.py``),
 so with the shipped defaults there is never an ``InFlightRun`` to tick.
 """
+import inspect
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -67,6 +69,8 @@ _THREAD_STATUS_BY_STRING: dict[str, ThreadStatus] = {
     "queued": ThreadStatus.RUNNING,
     "pendingInit": ThreadStatus.RUNNING,
     "errored": ThreadStatus.ERROR,
+    # Not a failure the runner reported — a job it has no record of at all.
+    "vanished": ThreadStatus.VANISHED,
 }
 
 # Action -> the terminal doorbell kind to ring. Only the terminal actions appear;
@@ -131,6 +135,8 @@ class InFlightRun:
     commit: str | None
     fix_forward_attempts: int = 0
     elapsed_seconds: float = 0.0
+    #: Restarts already spent after the job went missing. See ``Config``.
+    redispatch_attempts: int = 0
 
 
 @dataclass
@@ -141,14 +147,16 @@ class TickResult:
     reached an end state (closed or handed to a human) and should no longer be
     ticked. ``thread_id`` / ``fix_forward_attempts`` carry the (possibly updated)
     bookkeeping the caller threads into the next ``InFlightRun`` — they change
-    only on a FIX_FORWARD (new corrective thread, incremented attempts) and are
-    otherwise echoed back unchanged.
+    on a FIX_FORWARD (new corrective thread, incremented attempts) and on a
+    REDISPATCH (new thread, incremented restarts), and are otherwise echoed back
+    unchanged.
     """
 
     action: Action
     terminal: bool
     thread_id: str
     fix_forward_attempts: int
+    redispatch_attempts: int = 0
 
 
 class Watcher:
@@ -189,6 +197,8 @@ class Watcher:
             return self._escalate(run, state, action, config)
         if action is Action.FIX_FORWARD:
             return self._fix_forward(run, state)
+        if action is Action.REDISPATCH:
+            return self._redispatch(run)
         # WAIT: still in flight — just show progress and poll again next tick.
         return self._wait(run, state, action)
 
@@ -211,6 +221,7 @@ class Watcher:
             pushed=run.commit is not None,
             fix_forward_attempts=run.fix_forward_attempts,
             elapsed_seconds=run.elapsed_seconds,
+            redispatch_attempts=run.redispatch_attempts,
         )
 
     def _thread_status(self, thread_id: str) -> ThreadStatus | None:
@@ -261,8 +272,8 @@ class Watcher:
         so the next tick tracks the right thread.
         """
         attempts = run.fix_forward_attempts + 1
-        new_thread_id = self._t3.dispatch(
-            run.issue.repo, run.issue.number, _fix_forward_prompt(run)
+        new_thread_id = self._dispatch(
+            run, _fix_forward_prompt(run), kind="fix_forward"
         )
         self._post_checklist(run, Phase.CI, fix_forward_attempts=attempts)
         return TickResult(
@@ -270,7 +281,47 @@ class Watcher:
             terminal=False,
             thread_id=new_thread_id,
             fix_forward_attempts=attempts,
+            redispatch_attempts=run.redispatch_attempts,
         )
+
+    def _redispatch(self, run: InFlightRun) -> TickResult:
+        """The job is gone with nothing pushed: start the run again.
+
+        Not terminal, and deliberately quiet on labels — the in-progress lock
+        stays, so no other issue takes the slot and no human is paged for what is
+        usually an image update landing mid-run. A comment says what happened,
+        because a run whose job id changes without explanation is unreadable
+        afterwards.
+        """
+        attempts = run.redispatch_attempts + 1
+        new_thread_id = self._dispatch(run, _redispatch_prompt(run), kind="redispatch")
+        self._post_checklist(run, Phase.WORKTREE)  # back to "Picked up"
+        return TickResult(
+            action=Action.REDISPATCH,
+            terminal=False,
+            thread_id=new_thread_id,
+            fix_forward_attempts=run.fix_forward_attempts,
+            redispatch_attempts=attempts,
+        )
+
+    def _dispatch(self, run: InFlightRun, prompt: str, *, kind: str) -> str:
+        """Dispatch through the port, telling it what kind of turn this is.
+
+        The fixer's dispatcher builds its own prompt (a one-shot run needs the
+        standing context the poller's terse prompt assumes), and which prompt it
+        should build depends on the kind. A port that does not take ``kind`` —
+        the poller's client, and the simplest test fakes — still works: it gets
+        the prompt built here.
+
+        Support is decided by inspecting the signature, NOT by catching
+        ``TypeError`` from the call. A ``TypeError`` raised inside a dispatcher
+        that does support ``kind`` would then be retried without it, quietly
+        sending a first-turn prompt to a run that is mid-chain — which is the
+        exact failure this argument exists to prevent.
+        """
+        if _accepts_kind(self._t3.dispatch):
+            return self._t3.dispatch(run.issue.repo, run.issue.number, prompt, kind=kind)
+        return self._t3.dispatch(run.issue.repo, run.issue.number, prompt)
 
     def _wait(self, run: InFlightRun, state: RunState, action: Action) -> TickResult:
         """Still working: refresh the progress checklist, change nothing else."""
@@ -280,6 +331,7 @@ class Watcher:
             terminal=False,
             thread_id=run.thread_id,
             fix_forward_attempts=run.fix_forward_attempts,
+            redispatch_attempts=run.redispatch_attempts,
         )
 
     # ----------------------------------------------------------------- #
@@ -317,6 +369,7 @@ def _terminal(action: Action, run: InFlightRun) -> TickResult:
         terminal=True,
         thread_id=run.thread_id,
         fix_forward_attempts=run.fix_forward_attempts,
+        redispatch_attempts=run.redispatch_attempts,
     )
 
 
@@ -348,6 +401,34 @@ def _escalation_detail(action: Action, state: RunState) -> str:
         "Fix-forward budget exhausted with CI still red "
         f"({state.fix_forward_attempts} attempts, {state.elapsed_seconds:.0f}s). "
         "Frozen for a human."
+    )
+
+
+def _accepts_kind(dispatch: Callable) -> bool:
+    """Whether ``dispatch`` takes a ``kind`` keyword (or absorbs one via **kwargs)."""
+    try:
+        params = inspect.signature(dispatch).parameters
+    except (TypeError, ValueError):
+        # Un-introspectable callable (a builtin, or an odd C wrapper). Assume the
+        # narrow signature: sending the generic prompt is the safe direction.
+        return False
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return True
+    param = params.get("kind")
+    return param is not None and param.kind in (
+        inspect.Parameter.KEYWORD_ONLY,
+        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+    )
+
+
+def _redispatch_prompt(run: InFlightRun) -> str:
+    """The restart prompt: the previous turn was lost before it pushed anything."""
+    return (
+        f"Your previous turn on issue #{run.issue.number} in `{run.issue.repo}` was "
+        f"lost before it pushed anything — the process running it was replaced, so "
+        f"no work from it survives and nothing is half-applied. Start again from "
+        f"the issue and its comments; anything the lost turn reported there still "
+        f"stands."
     )
 
 

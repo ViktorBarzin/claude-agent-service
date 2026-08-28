@@ -147,6 +147,13 @@ def from_env(env: Mapping[str, str] | None = None) -> FixerConfig:
 # dataclass declares.
 UNBOUNDED = sys.maxsize
 
+#: How many times a run may restart after the runner loses its job. Unlike the
+#: fix-forward budget this one is BOUNDED and small: the case it exists for is
+#: the service being replaced mid-run, which one restart clears, and a job that
+#: disappears twice is not a rolling deployment.
+ENV_MAX_REDISPATCH_ATTEMPTS = "FIXER_MAX_REDISPATCH_ATTEMPTS"
+DEFAULT_MAX_REDISPATCH_ATTEMPTS = 1
+
 
 def loop_config(env: Mapping[str, str] | None = None) -> AfkConfig:
     """The AFK loop config as the fixer runs it.
@@ -156,6 +163,11 @@ def loop_config(env: Mapping[str, str] | None = None) -> AfkConfig:
     instead of the loop's 5 attempts / 3600 seconds. An explicit
     ``AFK_FIX_FORWARD_MAX_*`` in the environment still wins, so a deployment can
     put a ceiling back without a code change.
+
+    The re-dispatch bound goes the other way: it stays small (1 by default) and
+    is raised only by setting ``FIXER_MAX_REDISPATCH_ATTEMPTS``. A lost job is
+    cheap to retry but says nothing about progress, so an unbounded retry there
+    could rediscover the same fault forever without anyone noticing.
     """
     e = env if env is not None else os.environ
     base = afk_config.from_env(e)
@@ -165,6 +177,12 @@ def loop_config(env: Mapping[str, str] | None = None) -> AfkConfig:
         attempts = UNBOUNDED
     if not (e.get(afk_config.ENV_FIX_FORWARD_MAX_SECONDS) or "").strip():
         seconds = UNBOUNDED
+    raw = (e.get(ENV_MAX_REDISPATCH_ATTEMPTS) or "").strip()
+    try:
+        redispatches = int(raw) if raw else DEFAULT_MAX_REDISPATCH_ATTEMPTS
+    except ValueError:
+        redispatches = DEFAULT_MAX_REDISPATCH_ATTEMPTS
     return replace(base, fix_forward_max_attempts=attempts,
                    fix_forward_max_seconds=seconds,
+                   max_redispatch_attempts=max(0, redispatches),
                    human_label=from_env(e).human_label)

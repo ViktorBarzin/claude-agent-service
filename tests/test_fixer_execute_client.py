@@ -62,16 +62,41 @@ def test_a_completed_job_with_green_ci_closes_the_issue(
     assert fake_tracker.closed == [("infra", 5)]
 
 
-def test_a_job_the_runner_forgot_escalates_instead_of_waiting(
+def test_a_job_the_runner_forgot_is_restarted_once(
     fake_tracker, fake_ci, fake_notifier
 ):
-    """The gap the design doc flagged: a restart must not park a run forever."""
+    """A restart must not park a run forever — and must not wake a human either.
+
+    This asserted ESCALATE_PREPUSH until 2026-08-28. The usual cause of a job the
+    runner cannot find is its own process being replaced (an image update rolls
+    the pod, and jobs live in an in-process dict), and nothing was pushed, so the
+    run can simply start again. Escalating handed a person an issue whose only
+    problem was a pod roll; it happened twice during drills.
+    """
     client, _ = make_client(statuses={})
     client.track("job-lost")
     run = InFlightRun(
         issue=Issue(number=5, repo="infra", labels=["broken"], blocked_by=[],
                     labeled_by_trusted=True, priority=1),
         thread_id="job-lost", commit=None,
+    )
+    result = _watcher_tick(client, fake_tracker, fake_ci, fake_notifier, run)
+    assert result.action is Action.REDISPATCH
+    # The lock stays and nobody is paged: this is not terminal.
+    assert ("add", "infra", 5, "needs-human") not in fake_tracker.label_ops
+    assert result.redispatch_attempts == 1
+
+
+def test_a_job_that_vanishes_a_second_time_escalates(
+    fake_tracker, fake_ci, fake_notifier
+):
+    """One restart is a roll; two is something a third attempt will not fix."""
+    client, _ = make_client(statuses={})
+    client.track("job-lost")
+    run = InFlightRun(
+        issue=Issue(number=5, repo="infra", labels=["broken"], blocked_by=[],
+                    labeled_by_trusted=True, priority=1),
+        thread_id="job-lost", commit=None, redispatch_attempts=1,
     )
     result = _watcher_tick(client, fake_tracker, fake_ci, fake_notifier, run)
     assert result.action is Action.ESCALATE_PREPUSH
@@ -132,16 +157,28 @@ def test_an_unrecognised_status_escalates_rather_than_hanging():
     assert client.turn_state("job-1") == "errored"
 
 
-def test_a_forgotten_job_reads_as_errored():
-    """A pod restart takes the in-process job dict with it; the run is not still running."""
+def test_a_forgotten_job_reads_as_vanished_not_errored():
+    """A pod restart takes the in-process job dict with it; the run is not still
+    running, but neither did its turn fail. "Errored" asserted a failure the
+    runner never reported, and the loop escalated on it."""
     client, _ = make_client(statuses={})
     client.dispatch("infra", 5, "go")
-    assert client.turn_state("job-1") == "errored"
+    assert client.turn_state("job-1") == "vanished"
 
 
-def test_a_never_dispatched_job_reads_as_errored():
+def test_a_never_dispatched_job_reads_as_vanished():
     client, _ = make_client()
-    assert client.turn_state("job-nobody-started") == "errored"
+    assert client.turn_state("job-nobody-started") == "vanished"
+
+
+def test_an_unreachable_runner_still_reads_as_unknown_not_vanished():
+    """The distinction that already existed must survive: a runner we could not
+    ask says nothing about the job, so the run WAITs rather than restarting."""
+    from app.fixer import execute_client as ec
+    client = ec.ExecuteClient(lambda p, label="": "job-1",
+                              lambda job_id: dict(ec.UNREACHABLE))
+    client.dispatch("infra", 5, "go")
+    assert client.turn_state("job-1") == ec.STATE_UNKNOWN
 
 
 # --------------------------------------------------------------------------- #
@@ -206,8 +243,17 @@ def test_an_unknown_turn_state_makes_the_watcher_wait(
     assert ("add", "infra", 56, "needs-human") not in fake_tracker.label_ops
 
 
-def test_a_genuinely_unknown_job_still_escalates(fake_tracker, fake_ci, fake_notifier):
-    """The runner answering 'no such job' IS an assertion the run is gone."""
+def test_a_genuinely_unknown_job_restarts_the_run_once(
+    fake_tracker, fake_ci, fake_notifier
+):
+    """"No such job" is still an assertion — but about the JOB, not the work.
+
+    This asserted ESCALATE_PREPUSH until 2026-08-28. The assertion the runner
+    makes is that it has lost the record; it says nothing about the repair having
+    failed, and with nothing pushed there is nothing to salvage. The pairing that
+    matters is preserved by the test above: unreachable still WAITs, so a network
+    blip cannot restart a healthy run.
+    """
     client = ExecuteClient(lambda p: "job-1", lambda j: None)
     client.track("job-1")
     run = InFlightRun(
@@ -216,4 +262,6 @@ def test_a_genuinely_unknown_job_still_escalates(fake_tracker, fake_ci, fake_not
         thread_id="job-1", commit=None,
     )
     result = _watcher_tick(client, fake_tracker, fake_ci, fake_notifier, run)
-    assert result.action is Action.ESCALATE_PREPUSH
+    assert result.action is Action.REDISPATCH
+    assert result.thread_id == "job-1"  # the fake hands back the same id
+    assert result.redispatch_attempts == 1

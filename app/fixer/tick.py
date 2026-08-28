@@ -117,15 +117,38 @@ class FixerDispatcher:
         self._forgejo = forgejo
         self._cfg = cfg
 
-    def dispatch(self, repo: str, issue: int, prompt: str) -> str:
+    def dispatch(self, repo: str, issue: int, prompt: str,
+                 *, kind: str = "first") -> str:
+        """Dispatch a turn of ``kind`` for ``repo#issue``.
+
+        ``prompt`` is accepted to satisfy the port and deliberately unused: the
+        caller's prompt assumes a standing preamble that a one-shot run does not
+        have, so the right prompt is built here from the issue and the run's own
+        recorded state. ``kind`` says which one — an unrecognised kind raises
+        rather than falling back to the first-turn prompt, because sending "fix
+        this issue" to a turn that is mid-chain loses everything its predecessor
+        established.
+        """
         self._inner.label = f"{repo}#{issue}"
         issue_obj = self._forgejo.get_issue(repo, issue)
-        own = prompts.first_turn(
+        common = dict(
             owner=self._cfg.owner, repo=repo, number=issue,
             title=str(issue_obj.get("title") or ""),
             issue_url=self._cfg.issue_url(repo, issue),
-            trigger_label=self._cfg.trigger_label,
         )
+        if kind == "first":
+            own = prompts.first_turn(
+                **common, trigger_label=self._cfg.trigger_label
+            )
+        elif kind == "fix_forward":
+            bodies = [str(c.get("body") or "")
+                      for c in self._forgejo.list_comments(repo, issue)]
+            record = latest_record(bodies) or RunRecord(job_id="", started_at=0.0)
+            own = prompts.fix_forward_turn(**common, record=record)
+        elif kind == "redispatch":
+            own = prompts.redispatch_turn(**common)
+        else:
+            raise ValueError(f"unknown dispatch kind {kind!r}")
         return self._inner.dispatch(repo, issue, own)
 
     def snapshot(self) -> dict:
@@ -205,15 +228,18 @@ def watch(forgejo, tracker, dispatcher, notifier, loop_cfg: Config, cfg) -> list
                 commit=commit,
                 fix_forward_attempts=record.fix_forward_attempts,
                 elapsed_seconds=record.elapsed_seconds(time.time()),
+                redispatch_attempts=record.redispatch_attempts,
             )
             observed = dispatcher.snapshot()
             state = next((t.get("latestTurn", {}).get("state")
                           for t in observed.get("threads", [])
                           if t.get("id") == record.job_id), None)
             result = watcher.tick(run, loop_cfg)
-            log.info("watch %s#%s: job=%s turn=%s commit=%s attempts=%d -> %s",
+            log.info("watch %s#%s: job=%s turn=%s commit=%s attempts=%d "
+                     "restarts=%d -> %s",
                      repo, number, record.job_id, state, commit,
-                     record.fix_forward_attempts, result.action.value)
+                     record.fix_forward_attempts, record.redispatch_attempts,
+                     result.action.value)
             _persist(forgejo, repo, number, record, result, commit)
             lines.append(f"{repo}#{number}: {result.action.value}")
     return lines
@@ -222,26 +248,38 @@ def watch(forgejo, tracker, dispatcher, notifier, loop_cfg: Config, cfg) -> list
 def _persist(forgejo, repo: str, number: int, record: RunRecord, result, commit) -> None:
     """Write the run's new state back into the issue, when it changed.
 
-    Only a fix-forward turn changes state a later tick needs (a new job id and a
-    bumped attempt count). Terminal actions have already had their say via the
-    watcher's own comments, and WAIT changes nothing worth a comment — a tick
-    that posted on every WAIT would bury the issue in noise.
+    Two actions change state a later tick needs, both because they start a new
+    job: a fix-forward turn (new job id, bumped attempt count) and a re-dispatch
+    after the runner lost the job (new job id, bumped restart count). Terminal
+    actions have already had their say via the watcher's own comments, and WAIT
+    changes nothing worth a comment — a tick that posted on every WAIT would bury
+    the issue in noise.
     """
-    if result.action is not Action.FIX_FORWARD:
+    if result.action not in (Action.FIX_FORWARD, Action.REDISPATCH):
         return
+    fix_forwards = record.fix_forward_attempts
+    redispatches = record.redispatch_attempts
+    if result.action is Action.FIX_FORWARD:
+        fix_forwards += 1
+        visible = (f"CI came back red on `{commit}`. Dispatched a corrective turn "
+                   f"(attempt {fix_forwards}).")
+    else:
+        redispatches += 1
+        visible = (
+            f"The run's job was gone from the runner and nothing had been pushed "
+            f"— usually the service being replaced mid-run. Started it again "
+            f"(restart {redispatches}); no work was lost, because none had landed."
+        )
     updated = RunRecord(
         job_id=result.thread_id or record.job_id,
         started_at=record.started_at,
         commit=commit,
-        fix_forward_attempts=record.fix_forward_attempts + 1,
+        fix_forward_attempts=fix_forwards,
+        redispatch_attempts=redispatches,
         chain_parent=record.chain_parent,
         notes=record.notes,
     )
-    forgejo.comment(repo, number, render_comment(
-        f"CI came back red on `{commit}`. Dispatched a corrective turn "
-        f"(attempt {updated.fix_forward_attempts}).",
-        updated,
-    ))
+    forgejo.comment(repo, number, render_comment(visible, updated))
 
 
 def _issue_for(tracker, repo: str, number: int, raw: dict):

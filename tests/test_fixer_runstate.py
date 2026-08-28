@@ -219,3 +219,25 @@ def test_all_job_ids_still_collects_every_footer_id():
         render_comment("two", make_record(job_id="35af11b495cb")),
     ]
     assert all_job_ids(thread) == {"e91bc819f056", "35af11b495cb"}
+
+
+# --------------------------------------------------------------------------- #
+# redispatch_attempts — restarts after a lost job, persisted like the rest.
+# --------------------------------------------------------------------------- #
+def test_redispatch_attempts_survives_a_round_trip():
+    record = RunRecord(job_id="abc123", started_at=1.0, redispatch_attempts=1)
+    parsed = parse_footer(render_comment("restarted", record))
+    assert parsed is not None
+    assert parsed.redispatch_attempts == 1
+
+
+def test_a_footer_written_before_the_field_existed_reads_as_zero():
+    """Old footers on live issues must keep parsing — a run in flight when this
+    shipped would otherwise lose its state and be handed to a human."""
+    legacy = ('done\n\n<!-- fixer-state: {"chain_parent":null,"commit":null,'
+              '"fix_forward_attempts":0,"job_id":"abc123","notes":[],'
+              '"started_at":1.0} -->')
+    parsed = parse_footer(legacy)
+    assert parsed is not None
+    assert parsed.job_id == "abc123"
+    assert parsed.redispatch_attempts == 0

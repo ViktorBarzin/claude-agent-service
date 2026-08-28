@@ -188,3 +188,67 @@ def test_decision_table_is_total(
     result = next_action(state, make_config())
     assert isinstance(result, Action)
     assert result is _expected(thread_status, ci_status, pushed)
+
+
+# --------------------------------------------------------------------------- #
+# A vanished job with nothing pushed: re-dispatch once, then escalate.
+#
+# A 404 from the runner means "I have no record of this job". The usual cause is
+# not a failed turn but a pod roll: the service keeps jobs in an in-process dict,
+# so an image update mid-run takes the job with it. Nothing was pushed, so
+# nothing is half-done and starting over is safe — and escalating instead would
+# hand a human an issue whose only problem is that the pod restarted. Bounded to
+# one attempt, because a second vanish is evidence of something other than a
+# roll.
+# --------------------------------------------------------------------------- #
+def test_vanished_with_nothing_pushed_redispatches_once(make_config, make_run_state):
+    state = make_run_state(thread_status=ThreadStatus.VANISHED, pushed=False)
+    assert next_action(state, make_config()) is Action.REDISPATCH
+
+
+def test_vanished_twice_escalates_rather_than_looping(make_config, make_run_state):
+    state = make_run_state(
+        thread_status=ThreadStatus.VANISHED, pushed=False, redispatch_attempts=1
+    )
+    assert next_action(state, make_config()) is Action.ESCALATE_PREPUSH
+
+
+def test_vanished_respects_a_configured_redispatch_bound(make_config, make_run_state):
+    config = make_config(max_redispatch_attempts=2)
+    at_one = make_run_state(
+        thread_status=ThreadStatus.VANISHED, pushed=False, redispatch_attempts=1
+    )
+    at_two = make_run_state(
+        thread_status=ThreadStatus.VANISHED, pushed=False, redispatch_attempts=2
+    )
+    assert next_action(at_one, config) is Action.REDISPATCH
+    assert next_action(at_two, config) is Action.ESCALATE_PREPUSH
+
+
+@pytest.mark.parametrize(
+    "ci_status,expected",
+    [
+        (CIStatus.GREEN, Action.CLOSE_SUCCESS),
+        (CIStatus.RED, Action.FIX_FORWARD),
+        (CIStatus.PENDING, Action.WAIT),
+    ],
+)
+def test_vanished_after_a_push_is_decided_by_ci_not_by_the_job(
+    make_config, make_run_state, ci_status, expected
+):
+    """Once a commit is out, losing the job does not matter: the commit is real
+    and CI has the last word. Re-dispatching here would start a second run over
+    work that already landed."""
+    state = make_run_state(
+        thread_status=ThreadStatus.VANISHED, pushed=True, ci_status=ci_status
+    )
+    assert next_action(state, make_config()) is expected
+
+
+def test_a_genuinely_errored_turn_still_escalates_without_redispatch(
+    make_config, make_run_state
+):
+    """ERROR is the runner asserting the turn failed, which a fresh identical
+    turn has no particular reason to survive. Only a VANISHED job re-dispatches."""
+    state = make_run_state(thread_status=ThreadStatus.ERROR, pushed=False)
+    assert next_action(state, make_config()) is Action.ESCALATE_PREPUSH
