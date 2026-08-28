@@ -450,22 +450,152 @@ without a corrective cycle. That makes all five actions of the state machine —
 `WAIT`, `FIX_FORWARD`, `CLOSE_SUCCESS`, `ESCALATE_PREPUSH`, `FREEZE_ESCALATE` —
 exercised against the live loop rather than only in unit tests.
 
+## Two reliability gaps, and how they were closed
+
+Both came out of the fix-forward work rather than from a drill failing, and both
+were fixed on 2026-08-28.
+
+### A lost job was read as a failed turn
+
+A job the runner cannot find returned a 404, and a 404 read as `errored`, so the
+run escalated to `needs-human`. The usual cause is not a failure: `/execute`
+keeps jobs in an in-process dict, so replacing the service mid-run takes them
+with it. It happened twice during drills — both times because a push of mine
+rebuilt the image while a run was working — and both times a person would have
+been handed an issue whose only problem was a pod roll.
+
+A 404 now reads as a new `VANISHED` thread state rather than `ERROR`, and a
+vanished job with nothing pushed re-dispatches the run from the issue. The three
+readings stay distinct, which is the point:
+
+| What the runner said | Reading | Action |
+|---|---|---|
+| a terminal failure status | `ERROR` — the turn failed | escalate |
+| 404, no such job | `VANISHED` — the record is gone | restart once |
+| could not be reached | `UNKNOWN` — we do not know | wait |
+
+The restart budget is separate from fix-forward's and small (1, via
+`FIXER_MAX_REDISPATCH_ATTEMPTS`): one restart clears a rolling deployment, and a
+job that disappears twice is not a deployment. Restarts are counted in the issue
+footer beside the fix-forward attempts, so the bound survives the process.
+Footers written before the field existed read as zero, so a run in flight across
+the upgrade keeps its state.
+
+### A CI verdict was acted on while the turn was still running
+
+`next_action` consulted the CI verdict for a pushed commit without looking at
+whether the agent had stopped. Two things followed, and the second is the worse
+one:
+
+- `CLOSE_SUCCESS` closed the issue under a live turn — what infra#69 did at
+  `turn=running`. Nothing was lost, but the turn still held a clone and push
+  credentials, and a push it made afterwards would have landed on a closed issue
+  that nothing was watching: the tick only follows issues carrying the
+  in-progress label, and closing removes it.
+- `FIX_FORWARD` would dispatch a corrective turn alongside the turn already
+  running, putting two agents on the same issue and the same branch.
+
+A pushed run whose thread is `RUNNING` now waits, and the verdict is acted on one
+tick after the turn stops — which in the normal case costs nothing, because CI
+usually outlasts the turn.
+
+Cancelling the live turn was the other candidate and is not available today:
+there is no cancel endpoint, and `/execute` discards both the asyncio task and
+the subprocess handle, so nothing retains a way to stop a run. Waiting needs none
+of that and leaves the agent's work intact.
+
+A review pass over this change found that the first version of it had no bound
+on the path that matters. "Wait for the turn to stop" leans on the turn having a
+clock, and the fixer dispatches with `max_budget_usd=None` and
+`timeout_seconds=None` on purpose (decision 14: a run is bounded by the per-repo
+lock rather than by caps that would truncate a hard diagnosis mid-way). So on the
+fixer's own path there was nothing to end the wait, and a turn that wedged after
+pushing would have deferred the close indefinitely while holding the in-progress
+lock, with every other ready issue queued behind it.
+
+`close_defer_max_seconds` (7200, `FIXER_CLOSE_DEFER_SECONDS`) bounds how long the
+watcher waits before acting on a verdict it already has. It caps nothing the agent
+does and kills nothing, so the no-caps decision is untouched. Past the ceiling a
+green verdict closes and a red one escalates rather than fixing forward, because a
+second agent must not join a turn that is still live. Zero or less is refused
+rather than obeyed — that would release every verdict on the first tick, which is
+the behaviour the ceiling exists to prevent — and the ceiling does not apply
+before a push, so a long first turn keeps working.
+
+A close that does race a live turn now says so on the issue and names the job.
+The close writes no footer of its own, so the last one still names that job with
+nothing marking it abandoned; the note is what connects a later stray commit back
+to the run it came from.
+
+The same review measured the near-miss on infra#69 from the run logs: the
+orphaned turn outlived the close by **8 seconds** and pushed nothing. That was
+luck, not a bound — a tick firing early in a long corrective turn would leave a
+proportionally larger window.
+
+### Two more paths that acted on a live run
+
+A cross-check of the deferral found two others in the same family — something
+decides a run is over while its job is still going.
+
+**The dispatch lock was inferred from the ready set.** It read the in-progress
+label off the issues returned by `list_ready`, which holds only while an in-flight
+issue keeps its trigger label. Nothing in the loop removes it, but a person can,
+and reasonably might, on an issue an agent is already working. The issue then
+leaves the ready set, the repo stops counting as in flight, and the next drain
+starts a second run in the same repo — two agents, one branch. The webhook path
+never had this; its lock queries the in-progress label directly, and drain asks
+the same way now.
+
+That fix was nearly inert. `ChecklistCollapsingTracker` is what the fixer hands
+the poller, and it forwards methods by hand; the lock reads the new capability
+through `getattr` with a silent fallback, so a missing passthrough would not have
+raised — it would have quietly restored the bug. There is a passthrough now, and
+a test that names the whole forwarded surface so the next port method fails loudly
+instead of degrading. The wrapper had no tests before.
+
+**A failed footer write left a running job unfollowable.** Dispatch stamps the
+in-progress label before the footer comment is written, deliberately, so that a
+failed dispatch leaves the issue purely ready rather than wedged behind a phantom
+lock. That leaves a window where the label exists and the footer does not, and a
+tick in that window takes the no-footer branch: it releases the lock and hands the
+issue to a human while the job runs on. If the pod dies in the window the job dies
+with it, so escalating is then right; the case that matters is the comment POST
+failing while the job survives. The write is retried, a final failure is logged
+with the job id, and the escalation comment says a job may still be live rather
+than implying nothing happened.
+
+Reordering to comment-before-label was considered and rejected: a failed comment
+would then leave the issue ready with no lock, and the next tick would dispatch a
+second run.
+
+### Two things found while reading that path
+
+- **Corrective turns were never told they were corrective.**
+  `FixerDispatcher.dispatch` discarded the prompt it was handed and always built
+  the first-turn prompt, so `prompts.fix_forward_turn` — which takes the run
+  record and its predecessor's notes — was never called. The corrective turn on
+  infra#69 worked out what had happened by reading the issue thread, where the
+  tick had posted "CI came back red". It got there by diligence, not by being
+  told. Dispatch now takes an explicit kind, and an unrecognised kind raises
+  rather than falling back to a first-turn prompt. There were no tests for the
+  dispatcher at all, which is the more useful fact: a discarded argument is
+  invisible until something asserts on it.
+- **CI ran none of the tests.** The `lint-and-test` job already gated the build
+  and ran `echo "no test steps configured"`, so the suite covering this loop ran
+  only on whichever machine last edited the code, while Keel rolls whatever image
+  lands. It runs pytest now — 657 tests, and the first run passed end to end.
+- **A cancelled run left the agent running.** `asyncio.wait_for` cancels the
+  coroutine at its next await point, and the child process never hears about it.
+  A timed-out job flipped its record to `timeout` while `claude` kept working and
+  kept spending, and `cleanup_workspace` then deleted the workspace underneath
+  it. The subprocess is killed in a `finally` now, the shape the streaming
+  endpoint already used. This one never reached the fixer, which passes no
+  timeout; it affected every other caller, which keeps the 2700s default.
+
 ## Open questions
 
 Things this design asserts less firmly than the rest, to confirm during the
 build rather than assume:
-
-- **A run can close while a corrective turn is still in flight.** infra#69
-  reached `CLOSE_SUCCESS` at `turn=running`: CI went green on the pushed commit
-  while the corrective turn was still working. Nothing was lost here, but that
-  turn could in principle push after the issue is closed. Whether to cancel the
-  in-flight turn on close, or wait for it, is not yet decided.
-- **A pod roll mid-run escalates rather than retries.** An image update while a
-  run is in flight makes its job unfetchable, which is a 404 rather than a
-  transient error, so the run escalates to `needs-human`. That is the safe
-  direction and it is visible, but a nightly image update landing mid-run would
-  interrupt a real unblock. Treating "job gone, nothing pushed" as one automatic
-  re-dispatch is a candidate, bounded by the existing attempt counter.
 
 - **The exact webhook contract.** Forgejo is 11.0.14 (gitea-1.22.0 API) and hook
   events are a free-form string array in the API schema. `issues` and
