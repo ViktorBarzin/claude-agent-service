@@ -166,7 +166,14 @@ def _force_red_once(commit: str) -> bool:
         log.warning("ci: FORCING RED once for %s (drill affordance %s is set)",
                     commit, ENV_FORCE_RED_ONCE)
         return True
-    except OSError:
+    except OSError as exc:
+        # Armed but unable to keep its state. Say so: read as "not armed" this
+        # cost three days of ticks in which the affordance looked active and
+        # never fired, because the tick pod did not mount the volume this path
+        # lives on and the write raised PermissionError.
+        log.warning("ci: %s is set but the once-marker at %s is unwritable "
+                    "(%s) — NOT forcing red", ENV_FORCE_RED_ONCE,
+                    FORCE_RED_STATE, exc)
         return False
 
 

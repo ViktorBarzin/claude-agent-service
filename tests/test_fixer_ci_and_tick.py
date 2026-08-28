@@ -5,6 +5,7 @@ an unrecognised pipeline status must never read as SUCCESS (it would close an
 issue that never landed), and a tick must never leave an in-flight run with
 nothing driving it.
 """
+import logging
 import pytest
 
 from app.afk.ci_watcher import StageResult
@@ -420,6 +421,28 @@ def test_force_red_fires_once_then_never_again(monkeypatch, tmp_path):
     assert ci._force_red_once("abc1234") is True
     assert ci._force_red_once("abc1234") is False
     assert ci._force_red_once("abc1234") is False
+
+
+def test_force_red_says_so_when_it_cannot_keep_its_marker(monkeypatch, tmp_path, caplog):
+    """Armed but unable to persist -> still False, but no longer in silence.
+
+    The other tests here point FORCE_RED_STATE at a writable tmp_path, so none
+    of them saw the case that actually happened in the cluster: the tick pod did
+    not mount the volume the real path lives on, the container runs as uid 1000,
+    and the write raised PermissionError. It was caught and read as "not armed",
+    so the affordance looked active for three days of ticks without ever firing.
+    """
+    unwritable = tmp_path / "ro"
+    unwritable.mkdir()
+    unwritable.chmod(0o500)
+    monkeypatch.setenv("FIXER_CI_FORCE_RED_ONCE", "1")
+    monkeypatch.setattr(ci, "FORCE_RED_STATE", str(unwritable / "sub" / ".forced"))
+
+    with caplog.at_level(logging.WARNING):
+        assert ci._force_red_once("abc1234") is False
+
+    assert "NOT forcing red" in caplog.text
+    assert "FIXER_CI_FORCE_RED_ONCE" in caplog.text
 
 
 def test_force_red_is_per_commit(monkeypatch, tmp_path):

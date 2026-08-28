@@ -395,7 +395,7 @@ same outcome. A run also filed its own follow-up issue, correctly labelled
 `change`, reporting a real latent bug it noticed while working
 (`ingress_factory` dereferencing a null `var.sablier`).
 
-Six further defects came out of running it rather than testing it:
+Seven further defects came out of running it rather than testing it:
 
 1. **A run ended its turn on a plan.** It diagnosed a scaled-to-zero deployment
    perfectly — ruling out HPA, ResourceQuota, Kyverno and Sablier — then wrote
@@ -415,15 +415,57 @@ Six further defects came out of running it rather than testing it:
    Environment entry pointed at a directory that does not exist in the
    container, so every run rediscovered the layout.
 6. **The remote was the mirror** (above), which is the one that lost work.
+7. **The drill affordance for fix-forward had never fired.** The tick pod
+   mounted no volumes, so the once-per-commit marker the affordance keeps at
+   `/persistent/fixer-runs/.forced-red` was being written to the container root;
+   the container runs as uid 1000 and `/` is not writable, so the write raised
+   `PermissionError`. It was caught by an `except OSError: return False` that
+   also means "not armed", so for three days of ticks the affordance looked
+   active and did nothing, and the branch it exists to exercise stayed untested
+   while appearing covered. The volume is mounted on the tick now (infra
+   `7ceeef01`), and the handler logs the unwritable path instead of reporting it
+   as disarmed. Its unit tests pointed `FORCE_RED_STATE` at a writable
+   `tmp_path`, so they exercised the logic but never the real path, and passed
+   throughout. There is now a test for the unwritable case.
 
 Run logs made 5 and 6 findable at all: every run streams its events to
 `/persistent/fixer-runs/<date>/<issue>-<jobid>.jsonl`, flushed per line, with a
 summary carrying turns, a tool histogram and tool failures by name.
 
+### Fix-forward, end to end
+
+With the affordance working, `repo-defect` exercised the branch on infra#69 and
+the loop converged on the first corrective cycle:
+
+```
+12:32:16  job=2a6c024df289  turn=unknown    commit=None      attempts=0 -> wait
+12:34:02  job=2a6c024df289  turn=completed  commit=1d185d61   attempts=0 -> fix_forward
+12:36:03  job=2146aa9f5ef9  turn=running    commit=1d185d61   attempts=1 -> close_success
+```
+
+The forced red drove a corrective turn, which the run recorded on the issue as a
+new job id with `fix_forward_attempts: 1`; the second verdict for the same commit
+was the real one and the run closed. Total 325s against 162s for the same drill
+without a corrective cycle. That makes all five actions of the state machine —
+`WAIT`, `FIX_FORWARD`, `CLOSE_SUCCESS`, `ESCALATE_PREPUSH`, `FREEZE_ESCALATE` —
+exercised against the live loop rather than only in unit tests.
+
 ## Open questions
 
 Things this design asserts less firmly than the rest, to confirm during the
 build rather than assume:
+
+- **A run can close while a corrective turn is still in flight.** infra#69
+  reached `CLOSE_SUCCESS` at `turn=running`: CI went green on the pushed commit
+  while the corrective turn was still working. Nothing was lost here, but that
+  turn could in principle push after the issue is closed. Whether to cancel the
+  in-flight turn on close, or wait for it, is not yet decided.
+- **A pod roll mid-run escalates rather than retries.** An image update while a
+  run is in flight makes its job unfetchable, which is a 404 rather than a
+  transient error, so the run escalates to `needs-human`. That is the safe
+  direction and it is visible, but a nightly image update landing mid-run would
+  interrupt a real unblock. Treating "job gone, nothing pushed" as one automatic
+  re-dispatch is a candidate, bounded by the existing attempt counter.
 
 - **The exact webhook contract.** Forgejo is 11.0.14 (gitea-1.22.0 API) and hook
   events are a free-form string array in the API schema. `issues` and
