@@ -38,6 +38,17 @@ ENV_WOODPECKER_TOKEN = "FIXER_WOODPECKER_TOKEN"
 ENV_WOODPECKER_REPO_ID = "FIXER_WOODPECKER_REPO_ID"
 ENV_GITHUB_TOKEN = "FIXER_GITHUB_TOKEN"
 ENV_GITHUB_REPO = "FIXER_GITHUB_REPO"
+#: DRILL AFFORDANCE, off by default. With this set, the FIRST verdict asked for
+#: any given commit comes back RED, and every later verdict for that same commit
+#: is the real one. It exists because the fix-forward path is otherwise
+#: unreachable in a drill: this repo's CI is apply-only, so a docs commit can
+#: never turn it red, and the alternative — breaking a shared Terraform module to
+#: force a failing plan — risks every stack's apply.
+#:
+#: What it does NOT simulate is Woodpecker's own red detection; that is covered by
+#: unit tests over every status string the API returns.
+ENV_FORCE_RED_ONCE = "FIXER_CI_FORCE_RED_ONCE"
+FORCE_RED_STATE = "/persistent/fixer-runs/.forced-red"
 
 DEFAULT_WOODPECKER_URL = "http://woodpecker-server.woodpecker.svc.cluster.local"
 DEFAULT_WOODPECKER_REPO_ID = "1"
@@ -133,6 +144,32 @@ class GitHubChecks:
         return worst
 
 
+def _force_red_once(commit: str) -> bool:
+    """True the first time a verdict is asked for ``commit``, while armed.
+
+    The seen-set is a file on the persistent volume rather than process state,
+    because each tick runs in a fresh pod — in memory it would fire every tick
+    and the run would never leave fix-forward.
+    """
+    if not (os.environ.get(ENV_FORCE_RED_ONCE) or "").strip():
+        return False
+    try:
+        os.makedirs(os.path.dirname(FORCE_RED_STATE), exist_ok=True)
+        seen: set[str] = set()
+        if os.path.exists(FORCE_RED_STATE):
+            with open(FORCE_RED_STATE) as fh:
+                seen = {line.strip() for line in fh if line.strip()}
+        if commit in seen:
+            return False
+        with open(FORCE_RED_STATE, "a") as fh:
+            fh.write(commit + "\n")
+        log.warning("ci: FORCING RED once for %s (drill affordance %s is set)",
+                    commit, ENV_FORCE_RED_ONCE)
+        return True
+    except OSError:
+        return False
+
+
 class WoodpeckerPipelines:
     """The deploy stage: Woodpecker's pipeline for the pushed commit.
 
@@ -146,6 +183,8 @@ class WoodpeckerPipelines:
         self._repo_id = repo_id
 
     def deploy_conclusion(self, repo: str, commit: str) -> StageResult:
+        if _force_red_once(commit):
+            return StageResult.FAILURE
         data = _get_json(
             f"{self._base}/api/repos/{self._repo_id}/pipelines?perPage=50",
             {"Authorization": f"Bearer {self._token}"},

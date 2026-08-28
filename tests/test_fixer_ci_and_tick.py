@@ -401,3 +401,43 @@ def test_the_kill_switch_makes_a_tick_do_nothing(monkeypatch):
     monkeypatch.setattr(tick, "build", lambda *a, **k: called.append(1))
     assert tick.main([]) == 0
     assert called == []
+
+
+# --------------------------------------------------------------------------- #
+# The drill affordance for the otherwise-unreachable fix-forward path.
+# --------------------------------------------------------------------------- #
+def test_force_red_is_off_unless_armed(monkeypatch, tmp_path):
+    monkeypatch.delenv("FIXER_CI_FORCE_RED_ONCE", raising=False)
+    monkeypatch.setattr(ci, "FORCE_RED_STATE", str(tmp_path / ".forced"))
+    assert ci._force_red_once("abc1234") is False
+
+
+def test_force_red_fires_once_then_never_again(monkeypatch, tmp_path):
+    """Once per commit, and the seen-set is on disk: each tick is a fresh pod, so
+    in-memory state would fire every tick and never leave fix-forward."""
+    monkeypatch.setenv("FIXER_CI_FORCE_RED_ONCE", "1")
+    monkeypatch.setattr(ci, "FORCE_RED_STATE", str(tmp_path / ".forced"))
+    assert ci._force_red_once("abc1234") is True
+    assert ci._force_red_once("abc1234") is False
+    assert ci._force_red_once("abc1234") is False
+
+
+def test_force_red_is_per_commit(monkeypatch, tmp_path):
+    monkeypatch.setenv("FIXER_CI_FORCE_RED_ONCE", "1")
+    monkeypatch.setattr(ci, "FORCE_RED_STATE", str(tmp_path / ".forced"))
+    assert ci._force_red_once("aaa1111") is True
+    assert ci._force_red_once("bbb2222") is True
+    assert ci._force_red_once("aaa1111") is False
+
+
+def test_an_armed_verdict_reports_failure_without_asking_woodpecker(monkeypatch, tmp_path):
+    monkeypatch.setenv("FIXER_CI_FORCE_RED_ONCE", "1")
+    monkeypatch.setattr(ci, "FORCE_RED_STATE", str(tmp_path / ".forced"))
+    called = []
+    monkeypatch.setattr(ci, "_get_json", lambda u, h: called.append(u))
+    client = ci.WoodpeckerPipelines("http://wp", "tok", "1")
+    assert client.deploy_conclusion("infra", "abc1234") is StageResult.FAILURE
+    assert called == []          # no request made
+    monkeypatch.setattr(ci, "_get_json",
+                        lambda u, h: [{"commit": "abc1234", "status": "success"}])
+    assert client.deploy_conclusion("infra", "abc1234") is StageResult.SUCCESS
