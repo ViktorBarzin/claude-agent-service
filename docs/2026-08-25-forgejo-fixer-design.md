@@ -135,12 +135,25 @@ ultimately runs the agent reaches the same dispatch with one hop fewer.
 
 ### Why Forgejo rather than GitHub
 
-Beyond "it is where the reports already are": `origin` in the infra clone **is**
-Forgejo (both remotes point there; there is no GitHub remote). So the
-responder's `git push origin master` and its `fixes #N` convention already
-resolve against Forgejo issue numbers, while the issue it was dispatched for is
-a GitHub issue with an unrelated number. On Forgejo the tracker and the commit
-convention refer to the same issue.
+Beyond "it is where the reports already are": `origin` in the **devvm's** infra
+clone is Forgejo, so a commit's issue reference resolves against the same tracker
+a run was dispatched from.
+
+> **Correction, 2026-08-28.** That was written from the devvm and was false in
+> the pod, which is where runs actually happen: the init container cloned
+> `github.com/ViktorBarzin/infra` — the mirror. So agent pushes landed downstream
+> of canonical and `ref #N` resolved against GitHub's unrelated issue numbers.
+> The fix-forward drill exposed it: a run committed `c526d61f`, pushed it, got
+> exit 0 and a real `b4552ed7..c526d61f` from github.com, and reported the issue
+> resolved — then the next Forgejo→GitHub sync force-overwrote GitHub's master
+> and the commit ended up on no branch anywhere. The run was honest; the remote
+> was wrong. The pod now clones Forgejo with the `infra-agent` credential in the
+> remote URL (infra `e2aabf99`).
+>
+> Two things this cost worth remembering: a push that exits 0 is not evidence it
+> reached the repo you meant, and git config set in an init container never
+> reaches the container the agent runs in — which is why an earlier
+> bot-identity `insteadOf` rule was inert.
 
 ### Execution model
 
@@ -372,6 +385,40 @@ responder's dependency on `secret/viktor`.
 
 Items 1, 2 and 4 carry testable behaviour and are built test-first, matching the
 existing `app/afk` suite's style (pure decisions, injected ports, fakes).
+
+## What later drills found
+
+The four cluster drills passed 4/4 twice (`scale-zero`, `bad-image`,
+`bad-selector`, `crashloop`), and the second suite — after the fixes below —
+needed 38% fewer turns, 46% less wall-clock and 86% fewer tool errors for the
+same outcome. A run also filed its own follow-up issue, correctly labelled
+`change`, reporting a real latent bug it noticed while working
+(`ingress_factory` dereferencing a null `var.sablier`).
+
+Six further defects came out of running it rather than testing it:
+
+1. **A run ended its turn on a plan.** It diagnosed a scaled-to-zero deployment
+   perfectly — ruling out HPA, ResourceQuota, Kyverno and Sablier — then wrote
+   "I will reconcile with `kubectl scale`" and stopped. A run is one turn, so
+   that was the end, and the service stayed down.
+2. **Escalation was not terminal.** `needs-human` drops the in-progress lock but
+   leaves the trigger label, so the next tick re-dispatched the issue the loop
+   had just given up on. With no rate caps that is a runaway; the dispatch gate
+   now refuses an escalated issue, checked first.
+3. **A transient fetch failure escalated a live run.** `fetch` returned `None`
+   for every error, and `None` meant "the runner forgot this job". A 404 is an
+   assertion; a timeout is not. They are separate now, and the watch tick logs
+   the turn state it saw so the next surprise explains itself.
+4. **The agent claimed credit for a human's action**, inferring cause from a
+   `Scaled up` event that records no actor.
+5. **The agent definition's paths were the devvm's, not the pod's** — every
+   Environment entry pointed at a directory that does not exist in the
+   container, so every run rediscovered the layout.
+6. **The remote was the mirror** (above), which is the one that lost work.
+
+Run logs made 5 and 6 findable at all: every run streams its events to
+`/persistent/fixer-runs/<date>/<issue>-<jobid>.jsonl`, flushed per line, with a
+summary carrying turns, a tool histogram and tool failures by name.
 
 ## Open questions
 
