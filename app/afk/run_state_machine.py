@@ -13,6 +13,11 @@ issues, dispatching corrective turns, escalating) based on the Action returned.
 
 The decision table (first match wins):
 
+  * pushed AND thread RUNNING                   -> WAIT
+      The turn is still working. A verdict-driven action now would either close
+      the issue under a live turn (which keeps a clone and push credentials) or
+      start a second turn on the same issue. An executing turn is bounded by the
+      runner's job timeout; a queued one waits for the queue to drain.
   * pushed AND CI green                         -> CLOSE_SUCCESS
       The run is healthy and verified; close the issue. The thread's own status
       is irrelevant once a pushed commit is green.
@@ -61,7 +66,19 @@ def next_action(state: RunState, config: Config) -> Action:
     the module docstring. See that table for the rationale of each branch.
     """
     if state.pushed:
-        # A commit is out; the CI verdict on it drives everything from here.
+        # The agent is still working. Nothing a CI verdict would tell us to do is
+        # safe yet: closing would end the run under a live turn that still holds
+        # a clone and push rights, and fix-forward would put a second agent on
+        # the same issue and branch. So wait for it to stop.
+        #
+        # This terminates without a deadline of its own: an executing job is
+        # capped by the runner's timeout and a timed-out job reports terminal. A
+        # job still QUEUED is capped only by the queue draining, which is slower
+        # but not unbounded.
+        if state.thread_status is ThreadStatus.RUNNING:
+            return Action.WAIT
+
+        # A commit is out and the turn has stopped; the CI verdict decides.
         if state.ci_status is CIStatus.GREEN:
             return Action.CLOSE_SUCCESS
         if state.ci_status is CIStatus.RED:

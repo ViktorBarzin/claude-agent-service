@@ -25,9 +25,14 @@ from app.afk.types import Action, CIStatus, ThreadStatus
 # --------------------------------------------------------------------------- #
 @pytest.mark.parametrize(
     "thread_status",
-    [ThreadStatus.RUNNING, ThreadStatus.IDLE, ThreadStatus.ERROR, None],
+    [ThreadStatus.IDLE, ThreadStatus.ERROR, ThreadStatus.VANISHED, None],
 )
 def test_pushed_and_green_closes_success(make_config, make_run_state, thread_status):
+    """Closes for every thread state EXCEPT a turn that is still running.
+
+    ``RUNNING`` used to be in this list. It came out on 2026-08-28: see
+    ``test_a_running_turn_defers_every_verdict_driven_action``.
+    """
     state = make_run_state(
         thread_status=thread_status, ci_status=CIStatus.GREEN, pushed=True
     )
@@ -132,25 +137,10 @@ def test_fix_forward_seconds_cap_comes_from_config(make_config, make_run_state):
     assert next_action(make_run_state(elapsed_seconds=120.0, **red), config) is Action.FREEZE_ESCALATE
 
 
-# --------------------------------------------------------------------------- #
-# A red CI on a pushed commit while the thread is still RUNNING a fix is, per
-# spec, keyed only on (pushed AND red) + budget — thread status doesn't gate it.
-# --------------------------------------------------------------------------- #
-@pytest.mark.parametrize(
-    "thread_status",
-    [ThreadStatus.RUNNING, ThreadStatus.IDLE, ThreadStatus.ERROR, None],
-)
-def test_pushed_red_with_budget_fixes_forward_for_any_thread_status(
-    make_config, make_run_state, thread_status
-):
-    state = make_run_state(
-        thread_status=thread_status,
-        ci_status=CIStatus.RED,
-        pushed=True,
-        fix_forward_attempts=0,
-        elapsed_seconds=0.0,
-    )
-    assert next_action(state, make_config()) is Action.FIX_FORWARD
+# (A red CI on a pushed commit no longer fixes forward for EVERY thread status:
+# a still-running turn defers. The row is covered, RUNNING included, by
+# test_red_ci_fixes_forward_only_once_the_turn_has_stopped below, which replaced
+# the narrower test that used to sit here.)
 
 
 # --------------------------------------------------------------------------- #
@@ -160,10 +150,16 @@ def test_pushed_red_with_budget_fixes_forward_for_any_thread_status(
 def _expected(thread_status, ci_status, pushed):
     """Reference implementation of the decision table, written independently of
     the module under test, to cross-check every combination."""
+    # A live turn defers anything the verdict would drive, so this comes first.
+    if pushed and thread_status is ThreadStatus.RUNNING:
+        return Action.WAIT
     if pushed and ci_status is CIStatus.GREEN:
         return Action.CLOSE_SUCCESS
     if pushed and ci_status is CIStatus.RED:
         return Action.FIX_FORWARD  # budget always available in this sweep
+    if not pushed and thread_status is ThreadStatus.VANISHED:
+        # Restart budget is untouched in this sweep, so there is always one left.
+        return Action.REDISPATCH
     if not pushed and thread_status in (ThreadStatus.ERROR, ThreadStatus.IDLE):
         return Action.ESCALATE_PREPUSH
     return Action.WAIT
@@ -171,7 +167,8 @@ def _expected(thread_status, ci_status, pushed):
 
 @pytest.mark.parametrize(
     "thread_status",
-    [ThreadStatus.RUNNING, ThreadStatus.IDLE, ThreadStatus.ERROR, None],
+    [ThreadStatus.RUNNING, ThreadStatus.IDLE, ThreadStatus.ERROR,
+     ThreadStatus.VANISHED, None],
 )
 @pytest.mark.parametrize("ci_status", [None, CIStatus.PENDING, CIStatus.GREEN, CIStatus.RED])
 @pytest.mark.parametrize("pushed", [True, False])
@@ -252,3 +249,80 @@ def test_a_genuinely_errored_turn_still_escalates_without_redispatch(
     turn has no particular reason to survive. Only a VANISHED job re-dispatches."""
     state = make_run_state(thread_status=ThreadStatus.ERROR, pushed=False)
     assert next_action(state, make_config()) is Action.ESCALATE_PREPUSH
+
+
+# --------------------------------------------------------------------------- #
+# A running turn defers every action a CI verdict would otherwise drive.
+#
+# Until 2026-08-28 a pushed commit's CI verdict decided the run on its own and
+# the turn's liveness was not consulted. Both outcomes were wrong while the agent
+# was still working:
+#
+#   * CLOSE_SUCCESS closed the issue under a live turn. Observed on infra#69,
+#     which reached close_success at turn=running. Nothing was lost there, but
+#     that turn still held a repo clone and push credentials, and a push it made
+#     afterwards would have landed on a closed issue that nothing was watching.
+#   * FIX_FORWARD dispatched a corrective turn alongside the turn already
+#     running, so two agents would work the same issue and push to the same
+#     branch concurrently.
+#
+# Deferring needs no new machinery to terminate: /execute runs every job under a
+# timeout (the fixer's configured one, else the service default of 2700s) and a
+# timed-out job reports a terminal status, so an EXECUTING turn cannot stay
+# RUNNING indefinitely. One caveat worth stating rather than glossing: that
+# timeout covers execution only, not the wait for an execution slot, so a job
+# still queued behind MAX_CONCURRENCY (10) other runs defers for the queue wait
+# too. That drains as those runs finish; it is not a deadlock, but it is not the
+# job timeout either.
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    "ci_status",
+    [CIStatus.GREEN, CIStatus.RED, CIStatus.PENDING, None],
+)
+def test_a_running_turn_defers_every_verdict_driven_action(
+    make_config, make_run_state, ci_status
+):
+    state = make_run_state(
+        thread_status=ThreadStatus.RUNNING, ci_status=ci_status, pushed=True
+    )
+    assert next_action(state, make_config()) is Action.WAIT
+
+
+@pytest.mark.parametrize(
+    "thread_status,expected",
+    [
+        (ThreadStatus.IDLE, Action.FIX_FORWARD),
+        (ThreadStatus.ERROR, Action.FIX_FORWARD),
+        (ThreadStatus.VANISHED, Action.FIX_FORWARD),
+        (None, Action.FIX_FORWARD),
+        (ThreadStatus.RUNNING, Action.WAIT),
+    ],
+)
+def test_red_ci_fixes_forward_only_once_the_turn_has_stopped(
+    make_config, make_run_state, thread_status, expected
+):
+    """A corrective turn is only correct when there is no turn already running.
+
+    ERROR/VANISHED still fix forward: the commit is real and out, so the work to
+    do is corrective regardless of how the previous turn ended.
+    """
+    state = make_run_state(
+        thread_status=thread_status, ci_status=CIStatus.RED, pushed=True
+    )
+    assert next_action(state, make_config()) is expected
+
+
+def test_deferring_does_not_consume_the_fix_forward_budget(make_config, make_run_state):
+    """WAIT must not look like an attempt — otherwise a long turn would burn the
+    budget it is not using."""
+    state = make_run_state(
+        thread_status=ThreadStatus.RUNNING, ci_status=CIStatus.RED, pushed=True,
+        fix_forward_attempts=0,
+    )
+    assert next_action(state, make_config(fix_forward_max_attempts=1)) is Action.WAIT
+    # And once it stops, the budget is still there to spend.
+    stopped = make_run_state(
+        thread_status=ThreadStatus.IDLE, ci_status=CIStatus.RED, pushed=True,
+        fix_forward_attempts=0,
+    )
+    assert next_action(stopped, make_config(fix_forward_max_attempts=1)) is Action.FIX_FORWARD
