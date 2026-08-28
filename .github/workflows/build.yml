@@ -21,7 +21,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - run: echo "no test steps configured"
+      # This job already gated `build`; it just did not run anything. The repo
+      # carries a full suite for the fixer loop — the autonomous path that
+      # pushes to infra master and closes issues — and Keel rolls whatever image
+      # lands, so an untested commit reached the cluster unchecked.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - run: python -m pytest tests/ -q
 
   build:
     needs: lint-and-test
