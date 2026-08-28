@@ -221,3 +221,98 @@ def test_evict_old_jobs_drops_finished_past_ttl():
     assert "fresh" in app_main.jobs
     assert "running" in app_main.jobs
     assert "queued" in app_main.jobs
+
+
+# --------------------------------------------------------------------------- #
+# A cancelled run must not leave the agent running.
+#
+# ``asyncio.wait_for`` cancels the coroutine at its next await point. The child
+# process does not hear about that, so before 2026-08-28 a timed-out job flipped
+# its record to "timeout" while `claude` kept working and kept spending — and
+# cleanup_workspace then deleted the workspace underneath it. The fixer itself
+# dispatches with no timeout (deliberately), so this bit every OTHER caller,
+# which keeps the 2700s default.
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_a_cancelled_invocation_kills_the_agent_process():
+    state = {"killed": 0, "returncode": None}
+
+    class NeverEndingProc:
+        def __init__(self):
+            self.stdout = self
+            self.stderr = self
+
+        @property
+        def returncode(self):
+            return state["returncode"]
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            await asyncio.sleep(3600)      # hangs where a real agent is mid-turn
+            raise StopAsyncIteration
+
+        async def read(self):
+            return b""
+
+        async def wait(self):
+            return 0
+
+        def kill(self):
+            state["killed"] += 1
+            state["returncode"] = -9
+
+    async def fake_spawn(*a, **kw):
+        return NeverEndingProc()
+
+    with patch("app.main.asyncio.create_subprocess_exec", side_effect=fake_spawn):
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(
+                app_main._invoke_claude_subprocess(
+                    prompt="p", agent="a", max_budget_usd=None, workspace="/tmp",
+                ),
+                timeout=0.05,
+            )
+
+    assert state["killed"] == 1, "the agent process was left running after cancellation"
+
+
+@pytest.mark.asyncio
+async def test_a_normal_invocation_does_not_kill_an_already_finished_process():
+    """The cleanup is conditional on the process still being alive, so a healthy
+    run must not have kill() called on it."""
+    state = {"killed": 0}
+
+    class DoneProc:
+        returncode = 0
+
+        def __init__(self):
+            self.stdout = self
+            self.stderr = self
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise StopAsyncIteration
+
+        async def read(self):
+            return b""
+
+        async def wait(self):
+            return 0
+
+        def kill(self):
+            state["killed"] += 1
+
+    async def fake_spawn(*a, **kw):
+        return DoneProc()
+
+    with patch("app.main.asyncio.create_subprocess_exec", side_effect=fake_spawn):
+        result = await app_main._invoke_claude_subprocess(
+            prompt="p", agent="a", max_budget_usd=None, workspace="/tmp",
+        )
+
+    assert result["exit_code"] == 0
+    assert state["killed"] == 0

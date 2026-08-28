@@ -137,6 +137,14 @@ class Config:
     # fix-forward budget, which the fixer leaves unbounded: that budget is for
     # corrective work on a real commit, this one is for a lost turn.
     max_redispatch_attempts: int = 1
+    # How long the watcher defers acting on a verdict it already has, while the
+    # turn is still running. NOT a cap on the agent: nothing is killed and the
+    # run is never truncated. It exists because the fixer dispatches with no
+    # timeout at all (deliberately — see ExecuteRequest), so "wait for the turn
+    # to stop" would otherwise have no clock behind it on the fixer's own path,
+    # and a turn that wedged after pushing would hold the in-progress lock and
+    # every other ready issue behind it indefinitely.
+    close_defer_max_seconds: int = 7200
 
 
 @dataclass

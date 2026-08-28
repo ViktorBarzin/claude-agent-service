@@ -240,12 +240,14 @@ def watch(forgejo, tracker, dispatcher, notifier, loop_cfg: Config, cfg) -> list
                      repo, number, record.job_id, state, commit,
                      record.fix_forward_attempts, record.redispatch_attempts,
                      result.action.value)
-            _persist(forgejo, repo, number, record, result, commit)
+            _persist(forgejo, repo, number, record, result, commit,
+                     observed_turn=state)
             lines.append(f"{repo}#{number}: {result.action.value}")
     return lines
 
 
-def _persist(forgejo, repo: str, number: int, record: RunRecord, result, commit) -> None:
+def _persist(forgejo, repo: str, number: int, record: RunRecord, result, commit,
+             *, observed_turn: str | None = None) -> None:
     """Write the run's new state back into the issue, when it changed.
 
     Two actions change state a later tick needs, both because they start a new
@@ -255,6 +257,20 @@ def _persist(forgejo, repo: str, number: int, record: RunRecord, result, commit)
     changes nothing worth a comment — a tick that posted on every WAIT would bury
     the issue in noise.
     """
+    if result.action is Action.CLOSE_SUCCESS and observed_turn == "running":
+        # The defer ceiling released this verdict with the turn still going. The
+        # close is right — the commit landed and CI is green — but the run is now
+        # unwatched while a job may still hold a clone and push rights, and the
+        # last footer names that job with nothing marking it abandoned. Leave the
+        # note so a later stray commit can be traced back here.
+        forgejo.comment(repo, number, (
+            f"Closing on green CI, but job `{record.job_id}` was still running "
+            f"when this closed — it passed the deferral ceiling, so the verdict "
+            f"was released rather than waiting longer. Nothing more is watching "
+            f"this issue; if a commit from that job appears later, this is where "
+            f"it came from."
+        ))
+        return
     if result.action not in (Action.FIX_FORWARD, Action.REDISPATCH):
         return
     fix_forwards = record.fix_forward_attempts

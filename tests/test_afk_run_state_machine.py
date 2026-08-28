@@ -326,3 +326,66 @@ def test_deferring_does_not_consume_the_fix_forward_budget(make_config, make_run
         fix_forward_attempts=0,
     )
     assert next_action(stopped, make_config(fix_forward_max_attempts=1)) is Action.FIX_FORWARD
+
+
+# --------------------------------------------------------------------------- #
+# The deferral is bounded, because the runner's timeout does not bound it.
+#
+# Deferring on a RUNNING turn assumed a job cannot stay RUNNING forever. That
+# holds for callers who pass a timeout, and NOT for the fixer: it dispatches with
+# max_budget_usd=None and timeout_seconds=None on purpose (design doc decision
+# 14 — a run is bounded by the per-repo lock rather than by caps that would
+# truncate a hard diagnosis mid-way). So on the fixer's own path there is no
+# clock, and a turn that wedges after pushing would defer the close forever,
+# holding the in-progress lock and every other `broken` issue behind it.
+#
+# The ceiling here is not a cap on the agent's work — nothing is killed, and the
+# no-caps decision stands. It only bounds how long the WATCHER waits before
+# acting on a verdict it already has.
+# --------------------------------------------------------------------------- #
+def test_a_wedged_turn_does_not_defer_a_green_close_forever(make_config, make_run_state):
+    config = make_config(close_defer_max_seconds=7200)
+    waiting = make_run_state(
+        thread_status=ThreadStatus.RUNNING, ci_status=CIStatus.GREEN, pushed=True,
+        elapsed_seconds=7199.0,
+    )
+    wedged = make_run_state(
+        thread_status=ThreadStatus.RUNNING, ci_status=CIStatus.GREEN, pushed=True,
+        elapsed_seconds=7200.0,
+    )
+    assert next_action(waiting, config) is Action.WAIT
+    assert next_action(wedged, config) is Action.CLOSE_SUCCESS
+
+
+def test_a_wedged_turn_with_red_ci_escalates_rather_than_racing_itself(
+    make_config, make_run_state
+):
+    """Past the ceiling a red verdict must NOT fix forward: that would put a
+    second agent on the branch beside a turn that is still running. A run this
+    far gone with a broken commit is what escalation is for."""
+    config = make_config(close_defer_max_seconds=7200)
+    wedged = make_run_state(
+        thread_status=ThreadStatus.RUNNING, ci_status=CIStatus.RED, pushed=True,
+        elapsed_seconds=7200.0, fix_forward_attempts=0,
+    )
+    assert next_action(wedged, config) is Action.FREEZE_ESCALATE
+
+
+def test_past_the_ceiling_a_pending_verdict_still_waits(make_config, make_run_state):
+    """The ceiling releases a verdict we already have; it does not invent one."""
+    config = make_config(close_defer_max_seconds=7200)
+    state = make_run_state(
+        thread_status=ThreadStatus.RUNNING, ci_status=CIStatus.PENDING, pushed=True,
+        elapsed_seconds=99999.0,
+    )
+    assert next_action(state, config) is Action.WAIT
+
+
+def test_the_ceiling_does_not_apply_before_a_push(make_config, make_run_state):
+    """An unpushed run has nothing to release, so a long first turn keeps
+    working — that is exactly the case the no-caps decision protects."""
+    config = make_config(close_defer_max_seconds=1)
+    state = make_run_state(
+        thread_status=ThreadStatus.RUNNING, pushed=False, elapsed_seconds=99999.0,
+    )
+    assert next_action(state, config) is Action.WAIT

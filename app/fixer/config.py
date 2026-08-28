@@ -154,6 +154,15 @@ UNBOUNDED = sys.maxsize
 ENV_MAX_REDISPATCH_ATTEMPTS = "FIXER_MAX_REDISPATCH_ATTEMPTS"
 DEFAULT_MAX_REDISPATCH_ATTEMPTS = 1
 
+#: How long the watcher defers a verdict while the turn is still running. This
+#: one deliberately does NOT join the fix-forward budgets in being unbounded:
+#: those bound the agent's work, which the design leaves uncapped, whereas this
+#: bounds only how long the watcher waits. With no job timeout on the fixer's
+#: dispatches there is nothing else to end the wait, so a turn that wedged after
+#: pushing would hold the in-progress lock and every issue behind it.
+ENV_CLOSE_DEFER_SECONDS = "FIXER_CLOSE_DEFER_SECONDS"
+DEFAULT_CLOSE_DEFER_SECONDS = 7200
+
 
 def loop_config(env: Mapping[str, str] | None = None) -> AfkConfig:
     """The AFK loop config as the fixer runs it.
@@ -182,7 +191,17 @@ def loop_config(env: Mapping[str, str] | None = None) -> AfkConfig:
         redispatches = int(raw) if raw else DEFAULT_MAX_REDISPATCH_ATTEMPTS
     except ValueError:
         redispatches = DEFAULT_MAX_REDISPATCH_ATTEMPTS
+    raw_defer = (e.get(ENV_CLOSE_DEFER_SECONDS) or "").strip()
+    try:
+        defer = int(raw_defer) if raw_defer else DEFAULT_CLOSE_DEFER_SECONDS
+    except ValueError:
+        defer = DEFAULT_CLOSE_DEFER_SECONDS
+    if defer <= 0:
+        # Zero would release every green verdict on the first tick, which is the
+        # behaviour the ceiling exists to prevent. Refuse it rather than obey.
+        defer = DEFAULT_CLOSE_DEFER_SECONDS
     return replace(base, fix_forward_max_attempts=attempts,
                    fix_forward_max_seconds=seconds,
                    max_redispatch_attempts=max(0, redispatches),
+                   close_defer_max_seconds=defer,
                    human_label=from_env(e).human_label)

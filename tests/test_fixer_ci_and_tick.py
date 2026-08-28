@@ -464,3 +464,97 @@ def test_an_armed_verdict_reports_failure_without_asking_woodpecker(monkeypatch,
     monkeypatch.setattr(ci, "_get_json",
                         lambda u, h: [{"commit": "abc1234", "status": "success"}])
     assert client.deploy_conclusion("infra", "abc1234") is StageResult.SUCCESS
+
+
+# --------------------------------------------------------------------------- #
+# The defer ceiling must NOT follow the fix-forward budgets into unbounded.
+# --------------------------------------------------------------------------- #
+def test_the_defer_ceiling_stays_bounded_even_though_fix_forward_is_not():
+    """The no-caps decision is about not truncating the agent's work: the fixer
+    dispatches with no budget and no timeout on purpose. This ceiling bounds only
+    how long the WATCHER waits before acting on a verdict it already has, and
+    because there is no job timeout to fall back on, making it unbounded too
+    would let a turn that wedged after pushing hold the in-progress lock — and
+    every other ready issue behind it — indefinitely."""
+    from app.fixer import config as fixer_config
+
+    cfg = fixer_config.loop_config(
+        {"AFK_ALLOWLIST": "infra", "AFK_KILL_SWITCH": "false"}
+    )
+    assert cfg.fix_forward_max_attempts == fixer_config.UNBOUNDED
+    assert cfg.fix_forward_max_seconds == fixer_config.UNBOUNDED
+    assert cfg.close_defer_max_seconds == fixer_config.DEFAULT_CLOSE_DEFER_SECONDS
+    assert cfg.close_defer_max_seconds < fixer_config.UNBOUNDED
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [("600", 600), ("", None), ("not-a-number", None), ("-5", None), ("0", None)],
+)
+def test_the_defer_ceiling_is_tunable_and_refuses_nonsense(raw, expected):
+    """A ceiling of zero or below would close every green run instantly, which is
+    the bug this exists to prevent, so it falls back rather than obeying."""
+    from app.fixer import config as fixer_config
+
+    cfg = fixer_config.loop_config({
+        "AFK_ALLOWLIST": "infra", "AFK_KILL_SWITCH": "false",
+        "FIXER_CLOSE_DEFER_SECONDS": raw,
+    })
+    want = fixer_config.DEFAULT_CLOSE_DEFER_SECONDS if expected is None else expected
+    assert cfg.close_defer_max_seconds == want
+
+
+# --------------------------------------------------------------------------- #
+# A close that races a live turn leaves a trail.
+# --------------------------------------------------------------------------- #
+def test_a_green_run_defers_its_close_while_the_turn_is_running(monkeypatch):
+    """The normal protection: no close, no comment churn, run stays in flight.
+
+    ``started_at`` has to be NOW, not the 1.0 the other tests here use: 1.0 is
+    epoch, so such a run is decades old and already past the defer ceiling.
+    """
+    import time
+
+    f = StubForgejo()
+    f.issues["agent-in-progress"] = [{"number": 9, "labels": [{"name": "broken"}]}]
+    f.comments[9] = [{"body": render_comment(
+        "pushed abc1234def",
+        RunRecord("job-1", time.time(), commit="abc1234def"))}]
+
+    class GreenCI:
+        def status(self, repo, commit):
+            return CIStatus.GREEN
+
+    monkeypatch.setattr(tick, "_ci_watcher", lambda: GreenCI())
+    lines = tick.watch(f, StubTracker(f), StubDispatcher({"job-1": "running"}),
+                       StubNotifier(), loop_config(), make_cfg())
+    assert lines == ["infra#9: wait"]
+    assert ("close", "infra", 9, "") not in f.label_ops
+
+
+def test_a_close_past_the_defer_ceiling_records_that_it_raced_a_live_turn(monkeypatch):
+    """Past the ceiling the close proceeds, because the commit landed and CI is
+    green. It must say so: the last footer still names the job, and without a
+    note there is nothing to connect a later stray push to this run."""
+    import time
+
+    f = StubForgejo()
+    f.issues["agent-in-progress"] = [{"number": 9, "labels": [{"name": "broken"}]}]
+    # Started long enough ago to be past the ceiling.
+    started = time.time() - 999_999
+    f.comments[9] = [{"body": render_comment(
+        "pushed abc1234def", RunRecord("job-1", started, commit="abc1234def"))}]
+
+    class GreenCI:
+        def status(self, repo, commit):
+            return CIStatus.GREEN
+
+    monkeypatch.setattr(tick, "_ci_watcher", lambda: GreenCI())
+    lines = tick.watch(f, StubTracker(f), StubDispatcher({"job-1": "running"}),
+                       StubNotifier(), loop_config(), make_cfg())
+
+    assert lines == ["infra#9: close_success"]
+    assert ("close", "infra", 9, "") in f.label_ops
+    bodies = "\n".join(c["body"] for c in f.comments[9])
+    assert "job-1" in bodies
+    assert "still running" in bodies

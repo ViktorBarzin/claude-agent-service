@@ -13,11 +13,18 @@ issues, dispatching corrective turns, escalating) based on the Action returned.
 
 The decision table (first match wins):
 
-  * pushed AND thread RUNNING                   -> WAIT
+  * pushed AND thread RUNNING,
+    within the defer ceiling                    -> WAIT
       The turn is still working. A verdict-driven action now would either close
       the issue under a live turn (which keeps a clone and push credentials) or
-      start a second turn on the same issue. An executing turn is bounded by the
-      runner's job timeout; a queued one waits for the queue to drain.
+      start a second turn on the same issue.
+  * pushed AND thread RUNNING,
+    past the defer ceiling                      -> CLOSE_SUCCESS on green,
+                                                   FREEZE_ESCALATE on red
+      The fixer runs with no job timeout by design, so deferring needs its own
+      ceiling or a turn that wedges after pushing holds the lock forever. Past
+      it, a green verdict is released (the commit landed) and a red one goes to a
+      human rather than starting a second turn beside a live one.
   * pushed AND CI green                         -> CLOSE_SUCCESS
       The run is healthy and verified; close the issue. The thread's own status
       is irrelevant once a pushed commit is green.
@@ -69,14 +76,20 @@ def next_action(state: RunState, config: Config) -> Action:
         # The agent is still working. Nothing a CI verdict would tell us to do is
         # safe yet: closing would end the run under a live turn that still holds
         # a clone and push rights, and fix-forward would put a second agent on
-        # the same issue and branch. So wait for it to stop.
+        # the same issue and branch. So wait for it to stop — but not forever.
         #
-        # This terminates without a deadline of its own: an executing job is
-        # capped by the runner's timeout and a timed-out job reports terminal. A
-        # job still QUEUED is capped only by the queue draining, which is slower
-        # but not unbounded.
+        # The fixer dispatches with no timeout on purpose, so there is no clock
+        # on the turn to inherit; past ``close_defer_max_seconds`` the turn stops
+        # being treated as authoritative. Releasing a green verdict then closes
+        # the run, and releasing a red one escalates rather than fixing forward,
+        # because a second agent must not join a turn that is still live.
         if state.thread_status is ThreadStatus.RUNNING:
-            return Action.WAIT
+            if state.elapsed_seconds < config.close_defer_max_seconds:
+                return Action.WAIT
+            if state.ci_status is CIStatus.RED:
+                return Action.FREEZE_ESCALATE
+            if state.ci_status is not CIStatus.GREEN:
+                return Action.WAIT
 
         # A commit is out and the turn has stopped; the CI verdict decides.
         if state.ci_status is CIStatus.GREEN:

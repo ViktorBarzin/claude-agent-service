@@ -301,19 +301,32 @@ async def _invoke_claude_subprocess(
     # stdout=PIPE / stderr=PIPE guarantee both streams are present.
     assert proc.stdout is not None and proc.stderr is not None
     output_lines: list[str] = []
-    async for line in proc.stdout:
-        text = line.decode()
-        output_lines.append(text)
-        if sink is not None:
-            # Written through as it arrives: a run killed mid-flight is exactly
-            # the one worth reading afterwards.
-            try:
-                sink(text)
-            except Exception:  # noqa: BLE001 - logging never fails a run
-                pass
+    try:
+        async for line in proc.stdout:
+            text = line.decode()
+            output_lines.append(text)
+            if sink is not None:
+                # Written through as it arrives: a run killed mid-flight is
+                # exactly the one worth reading afterwards.
+                try:
+                    sink(text)
+                except Exception:  # noqa: BLE001 - logging never fails a run
+                    pass
 
-    stderr = await proc.stderr.read()
-    await proc.wait()
+        stderr = await proc.stderr.read()
+        await proc.wait()
+    finally:
+        # Whoever cancelled us — a caller's timeout, a shutdown — the child does
+        # not hear about it. Without this the `claude` process outlived its own
+        # job record: the record flipped to "timeout" and the agent kept working
+        # and kept spending, while cleanup_workspace deleted the tree underneath
+        # it. Same shape as the streaming endpoint's cleanup below.
+        if proc.returncode is None:
+            try:
+                proc.kill()
+                await proc.wait()
+            except ProcessLookupError:
+                pass
 
     return {
         "exit_code": proc.returncode,
