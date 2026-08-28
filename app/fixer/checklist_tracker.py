@@ -40,6 +40,13 @@ class ChecklistCollapsingTracker:
     def list_ready(self, repos):
         return self._inner.list_ready(repos)
 
+    def list_in_progress(self, repos, label):
+        # The dispatch lock reads this to find repos with a run already in
+        # flight, and it reads it through getattr with a silent fallback — so
+        # omitting this passthrough would not raise, it would quietly put the
+        # lock back on the weaker ready-set derivation.
+        return self._inner.list_in_progress(repos, label)
+
     def add_label(self, repo, issue, label):
         self._inner.add_label(repo, issue, label)
 

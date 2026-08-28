@@ -106,7 +106,14 @@ def make_config():
 @pytest.fixture
 def make_run_state():
     """Factory for ``RunState``. Defaults to a freshly-dispatched run (thread
-    running, nothing pushed, no CI, no fix-forward attempts yet)."""
+    running, nothing pushed, no CI, no fix-forward attempts yet).
+
+    Note the ``thread_status`` default when writing a test with ``pushed=True``:
+    a pushed run whose turn is RUNNING defers every verdict-driven action, so a
+    test that omits ``thread_status`` and expects WAIT will pass via the deferral
+    rather than the branch it meant to exercise. Pass ``ThreadStatus.IDLE`` when
+    the point is what the CI verdict does.
+    """
     def _make(
         thread_status: ThreadStatus | None = ThreadStatus.RUNNING,
         ci_status: CIStatus | None = None,

@@ -558,3 +558,77 @@ def test_a_close_past_the_defer_ceiling_records_that_it_raced_a_live_turn(monkey
     bodies = "\n".join(c["body"] for c in f.comments[9])
     assert "job-1" in bodies
     assert "still running" in bodies
+
+
+# --------------------------------------------------------------------------- #
+# The footer is the run's only followable record, so its write is retried.
+#
+# drain dispatches, stamps the in-progress label, then writes the footer comment.
+# The order is deliberate — a failed dispatch must leave the issue purely ready
+# rather than wedged behind a phantom lock — but it leaves a window where the
+# label exists and the footer does not. A tick in that window takes the
+# no-footer branch: it releases the lock and hands the issue to a human while the
+# job is still running and can still push.
+#
+# If the pod dies in the window the job dies with it (jobs live in-process), so
+# escalating is then correct. The case that matters is narrower: the comment POST
+# failing while the job survives. One retry covers it.
+# --------------------------------------------------------------------------- #
+def test_the_footer_write_is_retried_before_the_run_becomes_unfollowable(monkeypatch):
+    attempts = {"n": 0}
+
+    class FlakyForgejo(StubForgejo):
+        def comment(self, repo, number, body):
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                raise RuntimeError("forgejo blipped")
+            return super().comment(repo, number, body)
+
+    f = FlakyForgejo()
+
+    class OneReady:
+        def list_ready(self, repos):
+            from app.afk.types import Issue
+            return [Issue(number=11, repo="infra", labels=["broken"],
+                          blocked_by=[], labeled_by_trusted=True, priority=1)]
+
+        def list_in_progress(self, repos, label):
+            return []
+
+        def add_label(self, repo, issue, label):
+            f.label_ops.append(("add", repo, issue, label))
+
+    started = tick.drain(OneReady(), StubDispatcher({}), f, loop_config(), make_cfg())
+
+    assert started == 1
+    assert attempts["n"] == 2, "the footer write was not retried"
+    record = latest_record([c["body"] for c in f.comments.get(11, [])])
+    assert record is not None, "the run ended up with no followable state"
+
+
+def test_a_footer_that_cannot_be_written_is_logged_loudly(monkeypatch, caplog):
+    """When every attempt fails the run is genuinely unfollowable. Nothing can
+    recover it from here, so the one useful thing is to say which job it was."""
+    class DeadForgejo(StubForgejo):
+        def comment(self, repo, number, body):
+            raise RuntimeError("forgejo down")
+
+    f = DeadForgejo()
+
+    class OneReady:
+        def list_ready(self, repos):
+            from app.afk.types import Issue
+            return [Issue(number=11, repo="infra", labels=["broken"],
+                          blocked_by=[], labeled_by_trusted=True, priority=1)]
+
+        def list_in_progress(self, repos, label):
+            return []
+
+        def add_label(self, repo, issue, label):
+            pass
+
+    with caplog.at_level(logging.ERROR):
+        tick.drain(OneReady(), StubDispatcher({}), f, loop_config(), make_cfg())
+
+    assert "job-new" in caplog.text
+    assert "infra#11" in caplog.text

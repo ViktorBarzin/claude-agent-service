@@ -130,7 +130,11 @@ def test_pushed_ci_pending_waits(
     fake_t3, fake_tracker, fake_ci, fake_notifier, make_issue, make_config
 ):
     issue = make_issue(number=7, repo="infra")
-    fake_t3.set_snapshot(_snapshot("thread-0", "running"))
+    # The turn must be FINISHED for this test to mean what it says. With a
+    # running turn the WAIT would come from the close-deferral instead, and this
+    # is the only watcher-level test of the pushed + CI-pending path — it would
+    # have gone on passing while covering nothing.
+    fake_t3.set_snapshot(_snapshot("thread-0", "idle"))
     # commit present (pushed) but CI not yet decided -> PENDING -> WAIT.
     fake_ci.set_status("infra", "deadbeef", CIStatus.PENDING)
     result = _watcher(fake_t3, fake_tracker, fake_ci, fake_notifier).tick(

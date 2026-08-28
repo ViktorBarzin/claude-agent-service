@@ -179,17 +179,47 @@ def drain(tracker, dispatcher, forgejo, loop_cfg: Config, cfg) -> int:
     result = Poller(tracker, dispatcher).run_once(loop_cfg)
     for started in result.dispatched:
         record = RunRecord(job_id=started.thread_id, started_at=time.time())
-        forgejo.comment(
-            started.issue.repo, started.issue.number,
-            render_comment(
-                "Picked this up from the queue — investigating.\n\n"
-                f"_Fixer run `{started.thread_id}`._",
-                record,
-            ),
-        )
+        _write_footer(forgejo, started.issue.repo, started.issue.number, record)
         log.info("drained %s#%s -> job %s (%s)", started.issue.repo,
                  started.issue.number, started.thread_id, started.reason)
     return len(result.dispatched)
+
+
+#: How many times the footer write is attempted. The footer is the only record
+#: that ties a running job to its issue, and a run without one is picked up by
+#: the no-footer branch below, which releases the lock and hands the issue to a
+#: human while the job is still going. Dispatch is stamped with the in-progress
+#: label BEFORE this write (deliberately — a failed dispatch must not wedge the
+#: issue behind a phantom lock), so a single failed POST here is what turns a
+#: healthy run into an unfollowable one.
+_FOOTER_WRITE_ATTEMPTS = 3
+
+
+def _write_footer(forgejo, repo: str, number: int, record: RunRecord) -> bool:
+    """Write the run's opening footer comment, retrying a transient failure."""
+    body = render_comment(
+        "Picked this up from the queue — investigating.\n\n"
+        f"_Fixer run `{record.job_id}`._",
+        record,
+    )
+    for attempt in range(1, _FOOTER_WRITE_ATTEMPTS + 1):
+        try:
+            forgejo.comment(repo, number, body)
+            return True
+        except Exception as exc:  # noqa: BLE001 - any failure loses the run
+            if attempt == _FOOTER_WRITE_ATTEMPTS:
+                # Nothing here can recover it: the job is running, the lock is
+                # stamped, and no tick can connect the two. Name the job, so the
+                # person who picks this up can find the run in the logs.
+                log.error(
+                    "could not record run state for %s#%s after %d attempts — "
+                    "job %s is running and now unfollowable (%s)",
+                    repo, number, attempt, record.job_id, exc,
+                )
+                return False
+            log.warning("footer write for %s#%s failed (attempt %d/%d): %s",
+                        repo, number, attempt, _FOOTER_WRITE_ATTEMPTS, exc)
+    return False
 
 
 def watch(forgejo, tracker, dispatcher, notifier, loop_cfg: Config, cfg) -> list[str]:
@@ -210,9 +240,14 @@ def watch(forgejo, tracker, dispatcher, notifier, loop_cfg: Config, cfg) -> list
                 # drive it, so hand it over rather than leaving it parked.
                 forgejo.remove_label(repo, number, loop_cfg.in_progress_label)
                 forgejo.add_label(repo, number, cfg.human_label)
-                forgejo.comment(repo, number,
-                                "This was marked in progress but carries no run state, "
-                                "so no tick can follow it through. Handing it over.")
+                forgejo.comment(repo, number, (
+                    "This was marked in progress but carries no run state, so "
+                    "no tick can follow it through. Handing it over.\n\n"
+                    "One thing to check before assuming nothing happened: the "
+                    "lock is stamped before the run's state is recorded, so a "
+                    "job may still be running for this issue and may still "
+                    "push. Search the service logs for this issue number "
+                    "before starting again."))
                 lines.append(f"{repo}#{number}: orphaned, escalated")
                 continue
 

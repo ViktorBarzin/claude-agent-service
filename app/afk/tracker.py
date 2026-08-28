@@ -97,6 +97,19 @@ class Tracker:
                 issues.append(self._to_issue(repo, raw))
         return issues
 
+    def list_in_progress(self, repos: list[str], label: str) -> list[Issue]:
+        """Every open issue across ``repos`` carrying ``label``.
+
+        The dispatch lock is made of the in-progress label, so it should be read
+        from that label rather than inferred from the ready set — an in-flight
+        issue whose trigger label a person removed is still in flight.
+        """
+        issues: list[Issue] = []
+        for repo in repos:
+            for raw in self.client.list_issues(repo, label):
+                issues.append(self._to_issue(repo, raw))
+        return issues
+
     def _to_issue(self, repo: str, raw: dict) -> Issue:
         number = int(raw["number"])
         labels = [lbl["name"] for lbl in raw.get("labels", [])]

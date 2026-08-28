@@ -268,3 +268,66 @@ def test_queries_only_the_allowlisted_repos(fake_t3, make_issue):
     poller.Poller(tracker=RecordingTracker(), t3_client=fake_t3).run_once(config)
 
     assert seen_repos == [["infra", "dotfiles"]]
+
+
+# --------------------------------------------------------------------------- #
+# The per-repo lock must not depend on the trigger label staying put.
+#
+# _in_flight_repos reads the in-progress label off the READY set, which works
+# only while an in-flight issue keeps its trigger label. Nothing in the loop
+# removes it — but a person can, and reasonably might, on an issue an agent is
+# already working. The issue then drops out of list_ready, the repo stops
+# counting as in flight, and the next drain starts a SECOND run in the same repo.
+# Two agents, same repo, both able to push.
+#
+# The webhook path was never exposed to this: receiver._repo_locked queries the
+# in-progress label directly rather than through the ready set. This makes drain
+# ask the same question, when the tracker can answer it.
+# --------------------------------------------------------------------------- #
+def test_the_repo_stays_locked_when_a_human_removes_the_trigger_label(
+    fake_t3, make_issue
+):
+    working = make_issue(number=5, repo="infra", labels=["agent-in-progress"])
+    queued = make_issue(number=6, repo="infra", labels=["broken"])
+
+    class Tracker:
+        def __init__(self):
+            self.labelled = []
+
+        def list_ready(self, repos):
+            # #5 lost its `broken` label, so it is no longer "ready" — the only
+            # place the old derivation looked.
+            return [queued]
+
+        def list_in_progress(self, repos, label):
+            return [working]
+
+        def add_label(self, repo, issue, label):
+            self.labelled.append((repo, issue, label))
+
+    tracker = Tracker()
+    config = Config(allowlist=["infra"], kill_switch=False)
+    result = poller.Poller(tracker=tracker, t3_client=fake_t3).run_once(config)
+
+    assert result.dispatched == [], "a second run started while one was in flight"
+    assert tracker.labelled == []
+
+
+def test_a_tracker_that_cannot_answer_falls_back_to_the_ready_set(fake_t3, make_issue):
+    """The old derivation is still correct in the normal case, and the poller's
+    port is deliberately narrow, so a tracker without the newer method keeps
+    working rather than losing the lock entirely."""
+    working = make_issue(number=5, repo="infra",
+                         labels=["broken", "agent-in-progress"])
+    queued = make_issue(number=6, repo="infra", labels=["broken"])
+
+    class OldTracker:
+        def list_ready(self, repos):
+            return [working, queued]
+
+        def add_label(self, repo, issue, label):
+            pass
+
+    config = Config(allowlist=["infra"], kill_switch=False)
+    result = poller.Poller(tracker=OldTracker(), t3_client=fake_t3).run_once(config)
+    assert result.dispatched == []

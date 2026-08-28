@@ -13,15 +13,20 @@ The status mapping is where the one real decision lives:
     completed                 -> "completed"   (turn finished; the state machine
                                                 then judges pushed/CI)
     failed · error · timeout  -> "errored"     (escalate)
-    unknown job id            -> "errored"
+    unknown job id            -> "vanished"    (restart the run, bounded)
+    runner unreachable        -> "unknown"     (WAIT — we did not find out)
 
-That last row closes a gap the design doc flagged as an open question. ``/execute``
-registers a job in an in-process dict before it answers, so a job we dispatched
-is always known to a live service; a job that has become unknown means the
-process restarted and took the run with it. Reporting that as ``errored`` makes
-the state machine escalate a run nobody is driving any more, rather than leaving
-an ``agent-in-progress`` label parked forever behind a thread status of "no idea
-yet".
+The last two rows are the ones worth reading twice. ``/execute`` registers a job
+in an in-process dict before it answers, so a job we dispatched is always known
+to a live service; a job that has become unknown means the process restarted and
+took the run with it. Until 2026-08-28 that read as ``errored``, which asserts a
+failure the runner never reported and escalated a run whose only problem was a
+pod roll. It reads as ``vanished`` now, and a vanished job with nothing pushed
+restarts the run once rather than waking a human.
+
+"Unreachable" stays separate from both: it is not an assertion about the job at
+all, so the run waits. Collapsing it into a failure escalated a healthy run two
+minutes into its work, once, for real.
 
 Both I/O calls are injected, so the same class serves the in-process caller (the
 webhook receiver, which starts jobs directly) and the CronJob (which reaches the

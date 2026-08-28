@@ -53,6 +53,11 @@ class TrackerPort(Protocol):
     def list_ready(self, repos: list[str]) -> list[Issue]: ...
     def add_label(self, repo: str, issue: int, label: str) -> None: ...
 
+    # Optional. Implemented by ``tracker.Tracker``; a tracker without it gets the
+    # ready-set derivation instead (see ``Poller._in_flight``). Declared here so
+    # the capability is discoverable rather than only living in a getattr.
+    # def list_in_progress(self, repos: list[str], label: str) -> list[Issue]: ...
+
 
 class T3Port(Protocol):
     """The slice of ``t3_client.T3Client`` the dispatch tick needs."""
@@ -118,7 +123,7 @@ class Poller:
             return PollResult()
 
         ready = self._tracker.list_ready(config.allowlist)
-        in_flight = _in_flight_repos(ready, config.in_progress_label)
+        in_flight = self._in_flight(ready, config)
 
         result = PollResult()
         for decision in self._dispatch(ready, config, in_flight):
@@ -135,17 +140,43 @@ class Poller:
             )
         return result
 
+    def _in_flight(self, ready: list[Issue], config: Config) -> set[str]:
+        """Repos with a run already in flight.
+
+        Asks the tracker for issues carrying the in-progress label when it can
+        answer that, because it is the label the lock is actually made of and it
+        does not depend on the trigger label staying put. The receiver's own lock
+        (``receiver._repo_locked``) has always asked this way.
+
+        Falls back to deriving it from the ready set for a tracker that only
+        implements the narrow port — correct in the normal case, and better than
+        no lock at all.
+        """
+        lister = getattr(self._tracker, "list_in_progress", None)
+        if lister is None:
+            return _in_flight_repos(ready, config.in_progress_label)
+        return {issue.repo
+                for issue in lister(config.allowlist, config.in_progress_label)}
+
 
 # --------------------------------------------------------------------------- #
 # Internals — pure helpers.
 # --------------------------------------------------------------------------- #
 def _in_flight_repos(ready: list[Issue], in_progress_label: str) -> set[str]:
-    """Repos that already have an agent in flight, read off the ready set.
+    """Repos with an agent in flight, derived from the ready set.
 
     A repo is in flight if any of its ready issues still carries the in-progress
     label — the stamp the poller applied on a previous tick's dispatch. Because
     the dispatched issue keeps its ready label until the watcher closes/relabels
     it, it re-appears here and locks the repo until the run finishes.
+
+    That last sentence is the assumption, and it holds only while nobody touches
+    the trigger label. Nothing in the loop removes it, but a person can — and
+    reasonably might, on an issue an agent is already working. The issue then
+    leaves the ready set, the repo stops counting as in flight, and the next
+    drain starts a second run in the same repo. Prefer
+    :meth:`Poller._in_flight`, which asks the tracker directly when it can; this
+    stays as the fallback for a tracker that only knows how to list ready work.
     """
     return {issue.repo for issue in ready if in_progress_label in issue.labels}
 
