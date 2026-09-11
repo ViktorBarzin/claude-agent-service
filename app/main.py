@@ -50,11 +50,15 @@ JOB_TTL_SECONDS = int(os.environ.get("JOB_TTL_SECONDS", "3600"))
 FETCH_DEBOUNCE_SECONDS = int(os.environ.get("FETCH_DEBOUNCE_SECONDS", "15"))
 
 # OpenAI compat: model selection is per-request so callers can pick
-# Haiku/Sonnet/Opus to control cost. The agent is fixed — `recruiter-triage`
-# has the broadest tool surface (WebSearch, WebFetch, Read, Grep, Glob, Bash);
-# the alternative (`beads-task-runner`) is locked to read-only `bd` verbs which
-# would fail arbitrary OpenAI-API callers. The model on the agent's frontmatter
-# is overridden by the `--model` CLI flag we pass per-request.
+# Haiku/Sonnet/Opus to control cost. NO agent is passed — an OpenAI-compatible
+# endpoint takes its instructions from the caller's system message, and a named
+# agent's own instructions compete with those. This used to run
+# `recruiter-triage`, picked for its tool surface, and the persona came with it:
+# asked on 2026-09-11 to extract travel segments from a real Egencia
+# confirmation, it answered "I'm the recruiter-triage agent — my job is to
+# produce a company deep-dive report" and returned nothing. The CLI's default
+# agent has a broader tool surface than recruiter-triage's anyway
+# (WebSearch, WebFetch, Read, Grep, Glob, Bash) and no persona of its own.
 # Bare aliases auto-roll forward to the latest published version of each
 # family. The Claude CLI resolves `haiku` → `claude-haiku-4-5-20251001`
 # (and bumps it when Anthropic ships a newer Haiku) — letting us avoid
@@ -72,7 +76,7 @@ SUPPORTED_MODELS: frozenset[str] = frozenset({
     "claude-opus-4-7",
 })
 DEFAULT_MODEL = "sonnet"
-OPENAI_COMPAT_AGENT = "recruiter-triage"
+OPENAI_COMPAT_AGENT = None  # no persona; the caller's system message is the brief
 OPENAI_COMPAT_BUDGET_USD = 2.0
 OPENAI_COMPAT_TIMEOUT_SECONDS = 900
 
@@ -274,7 +278,7 @@ async def cleanup_workspace(path: str | None) -> None:
 
 async def _invoke_claude_subprocess(
     prompt: str,
-    agent: str,
+    agent: str | None,
     max_budget_usd: float | None,
     workspace: str,
     model: str | None = None,
@@ -293,12 +297,16 @@ async def _invoke_claude_subprocess(
     # With a sink we ask for the EVENT STREAM rather than one final blob: the
     # point of the log is what happened during the run, and `json` only ever
     # tells us how it ended. The chat paths pass no sink and are unaffected.
-    cmd = [
-        "claude", "-p",
-        "--agent", agent,
+    cmd = ["claude", "-p"]
+    # `agent=None` is the OpenAI-compat path: no persona, so the caller's own
+    # system message is the only brief. Every named-agent caller (/execute, the
+    # fixer) still gets its agent.
+    if agent is not None:
+        cmd.extend(["--agent", agent])
+    cmd.extend([
         "--dangerously-skip-permissions",
         "--output-format", "stream-json" if sink is not None else "json",
-    ]
+    ])
     if sink is not None:
         cmd.append("--verbose")  # stream-json requires it
     # A budget of None means "no ceiling": omit the flag rather than passing a

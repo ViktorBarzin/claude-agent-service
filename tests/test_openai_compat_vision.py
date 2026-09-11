@@ -198,3 +198,49 @@ async def test_a_plain_string_request_is_unchanged(auth_header):
             )
     assert response.status_code == 200
     assert response.json()["choices"][0]["message"]["content"] == "Paris."
+
+
+@pytest.mark.asyncio
+async def test_the_compat_path_runs_with_no_agent_persona(auth_header):
+    """`--agent recruiter-triage` was chosen for its tool surface, but it also
+    carries that agent's instructions, and they win often enough to break the
+    contract: asked on 2026-09-11 to extract segments from a real Egencia
+    confirmation, the reply was "I'm the recruiter-triage agent — my job is to
+    produce a company deep-dive report", and no segments came back.
+
+    An OpenAI-compatible endpoint's instructions come from the caller's system
+    message. Passing no agent leaves the CLI's default, whose tool surface is
+    broader than recruiter-triage's anyway.
+    """
+    mock_proc = _mock_subprocess_returning(_result("ok"))
+    with patch("app.main.asyncio.create_subprocess_exec",
+               return_value=mock_proc) as spawn, \
+            patch("app.main.prepare_workspace", new=AsyncMock(return_value="/tmp/ws")), \
+            patch("app.main.cleanup_workspace", new=AsyncMock()):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            await client.post(
+                "/v1/chat/completions",
+                json={"model": "sonnet", "messages": [
+                    {"role": "system", "content": "You extract travel segments."},
+                    {"role": "user", "content": "Extract them."}]},
+                headers=auth_header,
+            )
+    argv = list(spawn.call_args.args)
+    assert "--agent" not in argv, f"no persona should be injected: {argv}"
+    assert "recruiter-triage" not in argv
+
+
+@pytest.mark.asyncio
+async def test_execute_still_runs_its_named_agent(auth_header):
+    """The /execute path picks an agent on purpose — that must not change."""
+    from app.main import _invoke_claude_subprocess
+
+    mock_proc = _mock_subprocess_returning(_result("done"))
+    with patch("app.main.asyncio.create_subprocess_exec",
+               return_value=mock_proc) as spawn:
+        await _invoke_claude_subprocess(
+            "do the thing", "beads-task-runner", 1.0, "/tmp/ws")
+    argv = list(spawn.call_args.args)
+    assert "--agent" in argv
+    assert argv[argv.index("--agent") + 1] == "beads-task-runner"
