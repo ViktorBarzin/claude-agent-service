@@ -1,6 +1,9 @@
 import asyncio
+import base64
+import binascii
 import hmac
 import json
+import logging
 import os
 import shutil
 import tempfile
@@ -19,6 +22,8 @@ from app import conversational
 from app.fixer import config as fixer_config
 from app.fixer import receiver as fixer_receiver
 from app.fixer.runlog import RunLog
+
+log = logging.getLogger(__name__)
 
 app = FastAPI(title="Claude Agent Service")
 
@@ -98,9 +103,22 @@ class ExecuteRequest(BaseModel):
     metadata: dict | None = None
 
 
+class ChatContentPart(BaseModel):
+    """One part of an OpenAI multimodal `content` list."""
+    type: str
+    text: str | None = None
+    image_url: dict | None = None
+    model_config = {"extra": "allow"}
+
+
 class ChatMessage(BaseModel):
     role: Literal["system", "user", "assistant"]
-    content: str
+    # A plain string is the original contract and still the common case. A list
+    # of parts is the OpenAI multimodal shape, accepted so a caller whose own
+    # vision model is down can send the image here instead (TripIt's ingest
+    # fallback). Images travel inline as `data:` URIs; see write_inline_images
+    # for why they land on disk rather than in the prompt.
+    content: str | list[ChatContentPart]
 
 
 class ChatCompletionsRequest(BaseModel):
@@ -427,16 +445,95 @@ def _one_line(text: str, limit: int = 200) -> str:
     return flat[:limit]
 
 
-def _synthesise_prompt(messages: list[ChatMessage]) -> str:
+# MIME type → the extension the agent's Read tool expects. Anything outside
+# this map is not an image we can hand over, so it is dropped.
+_IMAGE_EXTENSIONS = {
+    "image/png": "png",
+    "image/jpeg": "jpg",
+    "image/jpg": "jpg",
+    "image/gif": "gif",
+    "image/webp": "webp",
+}
+
+
+def _message_text(content: object) -> str:
+    """The text of one message, whether it came as a string or as parts."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n\n".join(
+            part.text for part in content
+            if getattr(part, "type", None) == "text" and getattr(part, "text", None))
+    return ""
+
+
+def _inline_image_urls(messages: list[ChatMessage]) -> list[str]:
+    """Every `image_url` url carried by the messages, in order."""
+    urls: list[str] = []
+    for message in messages:
+        if not isinstance(message.content, list):
+            continue
+        for part in message.content:
+            if part.type != "image_url" or not isinstance(part.image_url, dict):
+                continue
+            url = part.image_url.get("url")
+            if isinstance(url, str) and url:
+                urls.append(url)
+    return urls
+
+
+def write_inline_images(workspace: str, urls: list[str]) -> list[str]:
+    """Decode `data:` image URIs into `workspace`; return the filenames written.
+
+    The claude CLI takes its prompt on argv, so an image cannot travel in the
+    prompt: a phone screenshot is hundreds of KB, and base64 of it would blow
+    past ARG_MAX long before the model ever saw it. Writing the bytes into the
+    run's own workspace and naming the file lets the agent's Read tool open it,
+    which is the only image path the CLI has.
+
+    A non-`data:` url (a remote link) and anything that fails to decode are
+    skipped rather than written as junk — the agent has WebFetch for the former
+    and nothing useful to do with the latter.
+    """
+    written: list[str] = []
+    for url in urls:
+        if not url.startswith("data:"):
+            continue
+        header, _, encoded = url[len("data:"):].partition(",")
+        mime = header.split(";", 1)[0].strip().lower()
+        extension = _IMAGE_EXTENSIONS.get(mime)
+        if extension is None or not encoded:
+            continue
+        try:
+            raw = base64.b64decode(encoded, validate=True)
+        except (binascii.Error, ValueError):
+            log.warning("chat image part: undecodable %s payload, skipped", mime)
+            continue
+        name = f"input-image-{len(written) + 1}.{extension}"
+        with open(os.path.join(workspace, name), "wb") as handle:
+            handle.write(raw)
+        written.append(name)
+    return written
+
+
+def _synthesise_prompt(
+    messages: list[ChatMessage], image_files: list[str] | None = None,
+) -> str:
     """Flatten OpenAI chat messages into a single prompt body.
 
     System messages are surfaced as preamble; user messages become the
     actual request. Multiple user turns are concatenated in order so a
     short multi-turn back-and-forth still works (this is a stateless
     completion — we don't replay prior assistant turns).
+
+    `image_files` names the images already written into the run's workspace by
+    `write_inline_images`; the prompt points the agent at them by filename. The
+    bytes themselves never appear here.
     """
-    system_parts = [m.content for m in messages if m.role == "system"]
-    user_parts = [m.content for m in messages if m.role == "user"]
+    system_parts = [t for m in messages if m.role == "system"
+                    and (t := _message_text(m.content))]
+    user_parts = [t for m in messages if m.role == "user"
+                  and (t := _message_text(m.content))]
     # Assistant messages from prior turns are intentionally NOT injected —
     # claude `-p` is stateless and replaying them as user text would
     # confuse the agent.
@@ -445,6 +542,11 @@ def _synthesise_prompt(messages: list[ChatMessage]) -> str:
         sections.append("System instructions:\n" + "\n\n".join(system_parts))
     if user_parts:
         sections.append("Request:\n" + "\n\n".join(user_parts))
+    if image_files:
+        listed = "\n".join(f"- ./{name}" for name in image_files)
+        sections.append(
+            "Attached images (in your working directory — open each with the "
+            f"Read tool before answering):\n{listed}")
     if not sections:
         # Defensive — pydantic min_length=1 should already prevent this.
         return ""
@@ -606,7 +708,7 @@ async def chat_completions(
 
         return StreamingResponse(event_stream(), media_type="text/event-stream")
 
-    prompt = _synthesise_prompt(request.messages)
+    image_urls = _inline_image_urls(request.messages)
 
     if not _reserve_queue_slot():
         return JSONResponse(
@@ -619,6 +721,11 @@ async def chat_completions(
     try:
         async with _execution_slot():
             workspace = await prepare_workspace(chat_id)
+            # Images are written AFTER the workspace exists and the prompt is
+            # built from what actually landed, so a part we could not decode
+            # never gets advertised to the agent as a file to Read.
+            image_files = write_inline_images(workspace, image_urls)
+            prompt = _synthesise_prompt(request.messages, image_files)
             result = await asyncio.wait_for(
                 _invoke_claude_subprocess(
                     prompt, OPENAI_COMPAT_AGENT, OPENAI_COMPAT_BUDGET_USD,
