@@ -16,6 +16,7 @@ in the issue (the footer), which is what lets a tick run in a fresh pod and pick
 up exactly where the last one left off.
 """
 import argparse
+import datetime
 import logging
 import os
 import sys
@@ -40,6 +41,7 @@ from app.fixer.runstate import (
     all_job_ids,
     find_pushed_commit,
     latest_record,
+    parse_footer,
     render_comment,
 )
 
@@ -233,7 +235,8 @@ def watch(forgejo, tracker, dispatcher, notifier, loop_cfg: Config, cfg) -> list
     for repo in loop_cfg.allowlist:
         for raw in forgejo.list_issues(repo, loop_cfg.in_progress_label):
             number = int(raw.get("number") or 0)
-            bodies = [str(c.get("body") or "") for c in forgejo.list_comments(repo, number)]
+            comments = forgejo.list_comments(repo, number)
+            bodies = [str(c.get("body") or "") for c in comments]
             record = latest_record(bodies)
             if record is None:
                 # An in-progress label with no footer behind it: nothing here can
@@ -253,17 +256,21 @@ def watch(forgejo, tracker, dispatcher, notifier, loop_cfg: Config, cfg) -> list
 
             # EVERY job id the thread has carried is hex and appears in prose, so
             # none of them may be read as a pushed commit — not just this run's.
-            commit = (find_pushed_commit(bodies, exclude=all_job_ids(bodies))
-                      or record.commit)
+            job_ids = all_job_ids(bodies)
+            commit = find_pushed_commit(bodies, exclude=job_ids) or record.commit
             dispatcher.track(record.job_id)
             issue = _issue_for(tracker, repo, number, raw)
+            now = time.time()
+            declared_at = _declared_at(comments, commit, job_ids)
             run = InFlightRun(
                 issue=issue,
                 thread_id=record.job_id,
                 commit=commit,
                 fix_forward_attempts=record.fix_forward_attempts,
-                elapsed_seconds=record.elapsed_seconds(time.time()),
+                elapsed_seconds=record.elapsed_seconds(now),
                 redispatch_attempts=record.redispatch_attempts,
+                seconds_since_push=(None if declared_at is None
+                                    else max(0.0, now - declared_at)),
             )
             observed = dispatcher.snapshot()
             state = next((t.get("latestTurn", {}).get("state")
@@ -276,13 +283,46 @@ def watch(forgejo, tracker, dispatcher, notifier, loop_cfg: Config, cfg) -> list
                      record.fix_forward_attempts, record.redispatch_attempts,
                      result.action.value)
             _persist(forgejo, repo, number, record, result, commit,
-                     observed_turn=state)
+                     observed_turn=state, human_label=cfg.human_label)
             lines.append(f"{repo}#{number}: {result.action.value}")
     return lines
 
 
+def _declared_at(comments: list[dict], commit: str | None,
+                 job_ids: set[str]) -> float | None:
+    """When ``commit`` was first declared on the issue, as a unix timestamp.
+
+    The first comment that names it — by its ``Pushed-Commit:`` marker, or in a
+    footer that recorded it — marks when the wait for its CI verdict began. The
+    first, not the latest: a later footer that carries the same sha forward does
+    not restart the clock. ``None`` when no comment names it or the timestamp is
+    unreadable, which the state machine answers with the run's own start.
+    """
+    if not commit:
+        return None
+    for comment in comments:
+        body = str(comment.get("body") or "")
+        footer = parse_footer(body)
+        if (find_pushed_commit([body], exclude=job_ids) == commit
+                or (footer is not None and footer.commit == commit)):
+            return _epoch(comment.get("created_at"))
+    return None
+
+
+def _epoch(stamp: object) -> float | None:
+    """Forgejo's RFC 3339 ``created_at`` as a unix timestamp, or ``None``."""
+    try:
+        parsed = datetime.datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.timestamp()
+
+
 def _persist(forgejo, repo: str, number: int, record: RunRecord, result, commit,
-             *, observed_turn: str | None = None) -> None:
+             *, observed_turn: str | None = None,
+             human_label: str = fixer_config.DEFAULT_HUMAN_LABEL) -> None:
     """Write the run's new state back into the issue, when it changed.
 
     Two actions change state a later tick needs, both because they start a new
@@ -304,6 +344,20 @@ def _persist(forgejo, repo: str, number: int, record: RunRecord, result, commit,
             f"was released rather than waiting longer. Nothing more is watching "
             f"this issue; if a commit from that job appears later, this is where "
             f"it came from."
+        ))
+        return
+    if result.action is Action.ESCALATE_NO_VERDICT:
+        # The doorbell reaches one person; the issue is what everyone else reads.
+        # Say what was waited on and for what, so nobody has to dig through the
+        # tick logs to learn why the lock was released on a pushed run.
+        forgejo.comment(repo, number, (
+            f"Handing this over: `{commit}` was pushed and job `{record.job_id}` "
+            f"is no longer running, but CI never reported a verdict on that "
+            f"commit, so nothing more can move this run on its own. The lock is "
+            f"released so the queue can move.\n\n"
+            f"Worth checking whether the commit's pipeline ran and whether its "
+            f"apply landed. If it did, this can be closed. If not, removing "
+            f"`{human_label}` puts the issue back in the queue for a fresh run."
         ))
         return
     if result.action not in (Action.FIX_FORWARD, Action.REDISPATCH):

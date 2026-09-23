@@ -54,6 +54,17 @@ DEFAULT_WOODPECKER_URL = "http://woodpecker-server.woodpecker.svc.cluster.local"
 DEFAULT_WOODPECKER_REPO_ID = "1"
 DEFAULT_GITHUB_REPO = "ViktorBarzin/infra"
 
+#: Woodpecker serves at most 50 pipelines per page, whatever ``perPage`` asks for
+#: (measured on 3.14.1: ``perPage=200`` returns 50).
+PIPELINES_PER_PAGE = 50
+#: How far back a commit's pipeline is looked for: 20 pages, 1000 pipelines. The
+#: first page alone was about a day of infra pushes on a busy day, so a watcher
+#: that looked late — the tick suspended for five days, 2026-09-13 to 09-18 —
+#: found nothing and waited on a pipeline that had gone green long before. The
+#: bound keeps a commit that never got a pipeline from costing the whole
+#: history on every tick; about 90 KB and 70 ms a page, measured 2026-09-23.
+MAX_PIPELINE_PAGES = 20
+
 #: Woodpecker pipeline status -> stage result. Anything unrecognised is PENDING,
 #: never SUCCESS: an unknown status must not be able to close an issue.
 _WOODPECKER_STATUS = {
@@ -190,19 +201,36 @@ class WoodpeckerPipelines:
         self._repo_id = repo_id
 
     def deploy_conclusion(self, repo: str, commit: str) -> StageResult:
+        """The newest pipeline for ``commit``, searched back page by page.
+
+        The list is newest-first, so the first match is the latest run on that
+        commit — a manual re-run supersedes the push pipeline beneath it. A page
+        that cannot be read ends the search as NONE: we failed to ask, which says
+        nothing about the commit, and the next tick asks again.
+        """
         if _force_red_once(commit):
             return StageResult.FAILURE
-        data = _get_json(
-            f"{self._base}/api/repos/{self._repo_id}/pipelines?perPage=50",
-            {"Authorization": f"Bearer {self._token}"},
-        )
-        if not isinstance(data, list):
-            return StageResult.NONE
-        for pipeline in data:
-            if str(pipeline.get("commit") or "").startswith(commit[:7]):
-                status = str(pipeline.get("status") or "")
-                return _WOODPECKER_STATUS.get(status, StageResult.PENDING)
-        # No pipeline for this commit yet — the webhook may not have fired.
+        for page in range(1, MAX_PIPELINE_PAGES + 1):
+            data = _get_json(
+                f"{self._base}/api/repos/{self._repo_id}/pipelines"
+                f"?page={page}&perPage={PIPELINES_PER_PAGE}",
+                {"Authorization": f"Bearer {self._token}"},
+            )
+            if not isinstance(data, list):
+                return StageResult.NONE
+            for pipeline in data:
+                if str(pipeline.get("commit") or "").startswith(commit[:7]):
+                    status = str(pipeline.get("status") or "")
+                    return _WOODPECKER_STATUS.get(status, StageResult.PENDING)
+            if len(data) < PIPELINES_PER_PAGE:
+                # The oldest pipeline there is, and none for this commit. Usually
+                # the webhook has not fired yet.
+                return StageResult.NONE
+        # Same NONE as a commit pushed a moment ago, for a different reason. Say
+        # which, or a run waiting on a pipeline too old to see looks identical to
+        # one waiting on a pipeline about to start.
+        log.info("ci: no pipeline for %s in the newest %d — searched no further",
+                 commit, MAX_PIPELINE_PAGES * PIPELINES_PER_PAGE)
         return StageResult.NONE
 
 

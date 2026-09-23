@@ -236,6 +236,32 @@ def test_freeze_escalate_relabels_and_notifies(
 
 
 # --------------------------------------------------------------------------- #
+# ESCALATE_NO_VERDICT — pushed, turn over, CI never reported: hand over.
+# --------------------------------------------------------------------------- #
+def test_a_missing_verdict_hands_over_and_names_the_commit(
+    fake_t3, fake_tracker, fake_ci, fake_notifier, make_issue, make_config
+):
+    issue = make_issue(number=95, repo="infra")
+    fake_t3.set_snapshot(_snapshot("thread-0", "vanished"))
+    fake_ci.set_status("infra", "f69e3dcc", CIStatus.PENDING)
+    run = watcher.InFlightRun(issue=issue, thread_id="thread-0", commit="f69e3dcc",
+                              seconds_since_push=7200.0)
+
+    result = _watcher(fake_t3, fake_tracker, fake_ci, fake_notifier).tick(
+        run, make_config(ci_verdict_max_seconds=7200)
+    )
+
+    assert result.action is Action.ESCALATE_NO_VERDICT
+    assert result.terminal is True
+    assert fake_tracker.closed == []  # the commit may be fine; a human decides
+    labels = _labels(fake_tracker)
+    assert ("remove", "infra", 95, "agent-in-progress") in labels
+    assert ("add", "infra", 95, READY_FOR_HUMAN) in labels
+    assert _kinds(fake_notifier) == [KIND_NEEDS_HUMAN]
+    assert "f69e3dcc" in fake_notifier.sent[0]["detail"]
+
+
+# --------------------------------------------------------------------------- #
 # FIX_FORWARD — pushed, CI red, budget remaining: corrective turn, stay in flight.
 # --------------------------------------------------------------------------- #
 def test_fix_forward_dispatches_corrective_turn(

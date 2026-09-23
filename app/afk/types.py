@@ -68,7 +68,9 @@ class Action(Enum):
     on a pushed commit, dispatch another corrective turn; ``FREEZE_ESCALATE`` —
     fix-forward budget exhausted (attempts or wall-clock), stop and escalate;
     ``REDISPATCH`` — the job is gone and nothing was pushed, so start the run
-    again from the issue.
+    again from the issue; ``ESCALATE_NO_VERDICT`` — a commit was pushed and the
+    turn is over, but CI has not reported on it within the ceiling, so hand the
+    run to a human rather than hold the lock waiting for a verdict.
     """
 
     WAIT = "wait"
@@ -77,6 +79,7 @@ class Action(Enum):
     FIX_FORWARD = "fix_forward"
     FREEZE_ESCALATE = "freeze_escalate"
     REDISPATCH = "redispatch"
+    ESCALATE_NO_VERDICT = "escalate_no_verdict"
 
 
 # --------------------------------------------------------------------------- #
@@ -145,6 +148,14 @@ class Config:
     # and a turn that wedged after pushing would hold the in-progress lock and
     # every other ready issue behind it indefinitely.
     close_defer_max_seconds: int = 7200
+    # How long after a commit was declared the watcher waits for CI to report on
+    # it, once the turn is over, before handing the run to a human. Every other
+    # way out of a pushed run needs a verdict, so a verdict that never comes (a
+    # pipeline that never ran, one stuck blocked, or one the CI adapter cannot
+    # find) otherwise holds the in-progress lock forever: infra#95 held it for ten
+    # days. Infra pipelines measured 2026-09-13 to 09-23 ran 31 minutes at most
+    # and queued 138 seconds at most, so two hours is four times the worst seen.
+    ci_verdict_max_seconds: int = 7200
 
 
 @dataclass
@@ -168,3 +179,7 @@ class RunState:
     #: turns after a red pipeline — a lost job and a red build are different
     #: failures and share no budget.
     redispatch_attempts: int = 0
+    #: Seconds since the pushed commit was first declared, which is when the wait
+    #: for its CI verdict starts. ``None`` when not known, in which case the state
+    #: machine uses ``elapsed_seconds`` — the push cannot predate the run.
+    seconds_since_push: float | None = None

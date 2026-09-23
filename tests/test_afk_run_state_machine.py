@@ -389,3 +389,86 @@ def test_the_ceiling_does_not_apply_before_a_push(make_config, make_run_state):
         thread_status=ThreadStatus.RUNNING, pushed=False, elapsed_seconds=99999.0,
     )
     assert next_action(state, config) is Action.WAIT
+
+
+# --------------------------------------------------------------------------- #
+# A pushed commit whose CI verdict never arrives is handed to a human.
+#
+# infra#95, 2026-09-13 to 09-23: the run pushed, its job vanished with the pod,
+# and the CI adapter could not find the commit's pipeline. Every branch that
+# could end the run wanted something that was never coming — a verdict — so the
+# run waited ten days holding the per-repo lock, and two queued issues waited
+# behind it. The restart on a lost job did not apply, correctly: the work had
+# landed, and a restart would have redone it.
+#
+# The clock is time since the commit was declared, not since the run started, so
+# a long diagnosis that pushes at the end is not escalated on its first tick.
+# Only a turn the runner reports as over is escalated. A running turn keeps the
+# deferral it has always had, and an unreachable runner says nothing about the
+# turn, so neither is a reason to hand over.
+# --------------------------------------------------------------------------- #
+_OVER = [ThreadStatus.IDLE, ThreadStatus.ERROR, ThreadStatus.VANISHED]
+
+
+@pytest.mark.parametrize("thread_status", _OVER)
+@pytest.mark.parametrize("ci_status", [None, CIStatus.PENDING])
+def test_a_verdict_that_never_arrives_hands_the_run_to_a_human(
+    make_config, make_run_state, thread_status, ci_status
+):
+    config = make_config(ci_verdict_max_seconds=7200)
+    waiting = make_run_state(thread_status=thread_status, ci_status=ci_status,
+                             pushed=True, seconds_since_push=7199.0)
+    overdue = make_run_state(thread_status=thread_status, ci_status=ci_status,
+                             pushed=True, seconds_since_push=7200.0)
+    assert next_action(waiting, config) is Action.WAIT
+    assert next_action(overdue, config) is Action.ESCALATE_NO_VERDICT
+
+
+@pytest.mark.parametrize("thread_status", [ThreadStatus.RUNNING, None])
+def test_a_live_or_unknown_turn_is_never_escalated_for_a_missing_verdict(
+    make_config, make_run_state, thread_status
+):
+    config = make_config(ci_verdict_max_seconds=7200)
+    state = make_run_state(thread_status=thread_status, ci_status=CIStatus.PENDING,
+                           pushed=True, elapsed_seconds=99999.0,
+                           seconds_since_push=99999.0)
+    assert next_action(state, config) is Action.WAIT
+
+
+def test_the_verdict_clock_starts_at_the_push_not_the_run(make_config, make_run_state):
+    """A run that spent a day diagnosing and pushed a minute ago is not overdue."""
+    config = make_config(ci_verdict_max_seconds=7200)
+    state = make_run_state(thread_status=ThreadStatus.IDLE, ci_status=CIStatus.PENDING,
+                           pushed=True, elapsed_seconds=86400.0, seconds_since_push=60.0)
+    assert next_action(state, config) is Action.WAIT
+
+
+def test_without_a_push_time_the_clock_falls_back_to_the_run_start(
+    make_config, make_run_state
+):
+    """Unknown push time must not mean "wait forever" — that is the wedge. The
+    run's start is the earliest the push can have been, so it errs early."""
+    config = make_config(ci_verdict_max_seconds=7200)
+    state = make_run_state(thread_status=ThreadStatus.VANISHED, ci_status=CIStatus.PENDING,
+                           pushed=True, elapsed_seconds=7200.0, seconds_since_push=None)
+    assert next_action(state, config) is Action.ESCALATE_NO_VERDICT
+
+
+@pytest.mark.parametrize("ci_status,expected", [
+    (CIStatus.GREEN, Action.CLOSE_SUCCESS),
+    (CIStatus.RED, Action.FIX_FORWARD),
+])
+def test_a_late_verdict_still_decides_the_run(make_config, make_run_state, ci_status, expected):
+    """The ceiling covers a verdict that has not come. One that has, however
+    late, is acted on as usual."""
+    config = make_config(ci_verdict_max_seconds=7200)
+    state = make_run_state(thread_status=ThreadStatus.VANISHED, ci_status=ci_status,
+                           pushed=True, seconds_since_push=10 * 86400.0)
+    assert next_action(state, config) is expected
+
+
+def test_the_verdict_ceiling_does_not_apply_before_a_push(make_config, make_run_state):
+    config = make_config(ci_verdict_max_seconds=1)
+    state = make_run_state(thread_status=ThreadStatus.IDLE, pushed=False,
+                           elapsed_seconds=99999.0)
+    assert next_action(state, config) is Action.ESCALATE_PREPUSH

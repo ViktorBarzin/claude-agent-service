@@ -56,6 +56,88 @@ def test_an_unreachable_woodpecker_reads_as_none(monkeypatch):
     assert client.deploy_conclusion("infra", "abc1234") is StageResult.NONE
 
 
+def _paged_woodpecker(pages: dict[int, list[dict]], asked: list[int]):
+    """A fake ``_get_json`` serving Woodpecker's newest-first, 50-per-page list.
+
+    The server caps ``perPage`` at 50 whatever the client asks for, so "the
+    pipeline is on page 4" is an ordinary state for a commit a few days old.
+    """
+    import urllib.parse
+
+    def get(url, headers):
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+        page = int(query.get("page", ["1"])[0])
+        asked.append(page)
+        return pages.get(page, [])
+    return get
+
+
+def _filler(n: int, start: int) -> list[dict]:
+    return [{"commit": f"{start + i:040x}", "status": "success"} for i in range(n)]
+
+
+def test_a_commit_whose_pipeline_is_past_the_first_page_is_still_found(monkeypatch):
+    """infra#95, 2026-09-23: the run pushed f69e3dcc on 09-13, its pipeline went
+    green a minute later, and the tick first looked five days after that. By
+    then the pipeline sat on page 4, only page 1 was read, and "too old to see"
+    came back as "no pipeline yet" — a WAIT that could never end, holding the
+    per-repo lock over every queued issue for ten days."""
+    asked: list[int] = []
+    pages = {1: _filler(50, 0), 2: _filler(50, 100), 3: _filler(50, 200),
+             4: _filler(10, 300) + [{"commit": "f69e3dcc" + "0" * 32,
+                                     "status": "success"}]}
+    monkeypatch.setattr(ci, "_get_json", _paged_woodpecker(pages, asked))
+    client = ci.WoodpeckerPipelines("http://wp", "tok", "1")
+    assert client.deploy_conclusion("infra", "f69e3dcc" + "0" * 32) is StageResult.SUCCESS
+    assert asked == [1, 2, 3, 4]
+
+
+def test_the_search_stops_at_the_end_of_the_history(monkeypatch):
+    """A short page is the oldest pipeline there is: nothing past it to read."""
+    asked: list[int] = []
+    pages = {1: _filler(50, 0), 2: _filler(7, 100)}
+    monkeypatch.setattr(ci, "_get_json", _paged_woodpecker(pages, asked))
+    client = ci.WoodpeckerPipelines("http://wp", "tok", "1")
+    assert client.deploy_conclusion("infra", "abc1234") is StageResult.NONE
+    assert asked == [1, 2]
+
+
+def test_the_search_is_bounded_and_says_when_it_gives_up(monkeypatch, caplog):
+    """A commit that never got a pipeline must not cost the whole history on
+    every tick. Giving up is logged, because the result is the same NONE a
+    just-pushed commit returns, and the two must be told apart in the logs."""
+    asked: list[int] = []
+    pages = {p: _filler(50, p * 100) for p in range(1, 1000)}
+    monkeypatch.setattr(ci, "_get_json", _paged_woodpecker(pages, asked))
+    client = ci.WoodpeckerPipelines("http://wp", "tok", "1")
+    with caplog.at_level(logging.INFO, logger="app.fixer.ci"):
+        assert client.deploy_conclusion("infra", "abc1234") is StageResult.NONE
+    assert asked == list(range(1, ci.MAX_PIPELINE_PAGES + 1))
+    assert "abc1234" in caplog.text
+    assert str(ci.MAX_PIPELINE_PAGES * ci.PIPELINES_PER_PAGE) in caplog.text
+
+
+def test_the_newest_pipeline_for_a_commit_wins(monkeypatch):
+    """A manual re-run on the same commit supersedes the push pipeline under it,
+    which is how a killed apply gets finished by hand."""
+    asked: list[int] = []
+    pages = {1: [{"commit": "abc1234def", "status": "success"},
+                 {"commit": "abc1234def", "status": "killed"}]}
+    monkeypatch.setattr(ci, "_get_json", _paged_woodpecker(pages, asked))
+    client = ci.WoodpeckerPipelines("http://wp", "tok", "1")
+    assert client.deploy_conclusion("infra", "abc1234def") is StageResult.SUCCESS
+    assert asked == [1]
+
+
+def test_an_unreachable_page_mid_search_reads_as_none(monkeypatch):
+    """We failed to ask, which says nothing about the commit: wait, never guess."""
+    def get(url, headers):
+        return _filler(50, 0) if "page=1&" in url else None
+    monkeypatch.setattr(ci, "_get_json", get)
+    client = ci.WoodpeckerPipelines("http://wp", "tok", "1")
+    assert client.deploy_conclusion("infra", "abc1234") is StageResult.NONE
+
+
 # --------------------------------------------------------------------------- #
 # The unobserved build stage.
 # --------------------------------------------------------------------------- #
@@ -632,3 +714,86 @@ def test_a_footer_that_cannot_be_written_is_logged_loudly(monkeypatch, caplog):
 
     assert "job-new" in caplog.text
     assert "infra#11" in caplog.text
+
+
+# --------------------------------------------------------------------------- #
+# infra#95, replayed: a pushed run whose job vanished, watched late.
+#
+# The run pushed f69e3dcc on 2026-09-13 and declared it; the pod was replaced a
+# few seconds later, so the job vanished; the pipeline went green a minute after
+# that. The tick was suspended until 09-18 and then found the run with a commit
+# and no verdict, and waited on it until 09-23. These drive the real tick and the
+# real CI adapter, faking only the Woodpecker and Forgejo payloads.
+# --------------------------------------------------------------------------- #
+_SHA_95 = "f69e3dcc820eb1ca36698ca8b71b169a305911a7"
+
+
+def _iso(epoch: float) -> str:
+    import datetime
+    return datetime.datetime.fromtimestamp(epoch, datetime.timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
+
+
+def _issue_95(declared_at: float, started_at: float) -> StubForgejo:
+    f = StubForgejo()
+    f.issues["agent-in-progress"] = [{"number": 95, "labels": [{"name": "broken"}]}]
+    f.comments[95] = [
+        {"body": render_comment("Picked this up.\n\n_Fixer run `68a281700261`._",
+                                RunRecord("68a281700261", started_at)),
+         "created_at": _iso(started_at)},
+        {"body": f"**Resolved** — switched the probe.\n\nPushed-Commit: {_SHA_95}",
+         "created_at": _iso(declared_at)},
+    ]
+    return f
+
+
+def _woodpecker_pages(monkeypatch, pages: dict[int, list[dict]]) -> None:
+    monkeypatch.delenv(ci.ENV_FORCE_RED_ONCE, raising=False)
+    monkeypatch.setattr(ci, "_get_json", _paged_woodpecker(pages, []))
+    monkeypatch.setattr(tick, "_ci_watcher", lambda: ci.build_ci_watcher({}))
+
+
+def test_infra_95_closes_on_its_green_pipeline_four_pages_back(monkeypatch):
+    import time
+    ten_days_ago = time.time() - 10 * 86400
+    f = _issue_95(declared_at=ten_days_ago + 870, started_at=ten_days_ago)
+    _woodpecker_pages(monkeypatch, {
+        1: _filler(50, 0), 2: _filler(50, 100), 3: _filler(50, 200),
+        4: [{"commit": _SHA_95, "status": "success"}] + _filler(49, 300),
+    })
+    notifier = StubNotifier()
+    lines = tick.watch(f, StubTracker(f), StubDispatcher({"68a281700261": "vanished"}),
+                       notifier, loop_config(), make_cfg())
+    assert lines == ["infra#95: close_success"]
+    assert ("close", "infra", 95, "") in f.label_ops
+    assert notifier.sent == ["done"]
+
+
+def test_a_pushed_run_whose_pipeline_never_appears_is_handed_over(monkeypatch):
+    """The lock goes, a human is paged, and the issue says why in words."""
+    import time
+    ten_days_ago = time.time() - 10 * 86400
+    f = _issue_95(declared_at=ten_days_ago + 870, started_at=ten_days_ago)
+    _woodpecker_pages(monkeypatch, {1: _filler(12, 0)})
+    notifier = StubNotifier()
+    lines = tick.watch(f, StubTracker(f), StubDispatcher({"68a281700261": "vanished"}),
+                       notifier, loop_config(), make_cfg())
+    assert lines == ["infra#95: escalate_no_verdict"]
+    assert ("remove", "infra", 95, "agent-in-progress") in f.label_ops
+    assert ("add", "infra", 95, "needs-human") in f.label_ops
+    assert ("close", "infra", 95, "") not in f.label_ops
+    assert notifier.sent == ["needs-human"]
+    explained = [b for _, b in f.posted if _SHA_95 in b]
+    assert explained, "the hand-over must name the commit on the issue"
+
+
+def test_the_verdict_clock_starts_when_the_commit_was_declared(monkeypatch):
+    """A ten-day-old run that declared its commit five minutes ago is waiting
+    on a pipeline that may be about to start, not on one that never will."""
+    import time
+    now = time.time()
+    f = _issue_95(declared_at=now - 300, started_at=now - 10 * 86400)
+    _woodpecker_pages(monkeypatch, {1: _filler(12, 0)})
+    lines = tick.watch(f, StubTracker(f), StubDispatcher({"68a281700261": "vanished"}),
+                       StubNotifier(), loop_config(), make_cfg())
+    assert lines == ["infra#95: wait"]

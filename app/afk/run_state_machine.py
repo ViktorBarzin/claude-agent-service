@@ -36,6 +36,16 @@ The decision table (first match wins):
   * pushed AND CI red, budget exhausted         -> FREEZE_ESCALATE
       Out of fix-forward attempts or wall-clock; stop churning and hand to a
       human with the broken commit left in place.
+  * pushed AND CI undecided AND turn over
+    (IDLE/ERROR/VANISHED), at or past the
+    verdict ceiling since the push              -> ESCALATE_NO_VERDICT
+      Nothing else can end this run: every other exit needs a verdict, and the
+      turn that could have done more is gone. A pipeline that never ran, one
+      stuck blocked, or one the CI adapter cannot find would otherwise hold the
+      lock forever — infra#95 held it ten days. The clock starts at the push,
+      not the run, so a long diagnosis is not charged against its pipeline. A
+      RUNNING turn keeps its deferral, and an unknown one (runner unreachable)
+      is not an assertion that the turn is over, so neither escalates here.
   * not pushed AND thread VANISHED,
     redispatch budget remaining                 -> REDISPATCH
       The runner has no record of the job, which is what a pod roll looks like
@@ -63,6 +73,13 @@ from .types import Action, CIStatus, Config, RunState, ThreadStatus
 _TERMINAL_THREAD_STATES: frozenset[ThreadStatus] = frozenset(
     {ThreadStatus.ERROR, ThreadStatus.IDLE}
 )
+
+# Thread states in which the runner asserts the turn has ended — including a job
+# it no longer knows, which cannot come back. Deliberately excludes ``None``: an
+# unreachable runner said nothing about the turn.
+_OVER_THREAD_STATES: frozenset[ThreadStatus] = _TERMINAL_THREAD_STATES | {
+    ThreadStatus.VANISHED
+}
 
 
 def next_action(state: RunState, config: Config) -> Action:
@@ -100,7 +117,11 @@ def next_action(state: RunState, config: Config) -> Action:
                 if _fix_forward_budget_remaining(state, config)
                 else Action.FREEZE_ESCALATE
             )
-        # CI pending / not yet reported -> wait for the verdict.
+        # CI pending / not yet reported -> wait for the verdict, unless the turn
+        # is over and the verdict is overdue, in which case none is coming.
+        if (state.thread_status in _OVER_THREAD_STATES
+                and _seconds_waiting_for_verdict(state) >= config.ci_verdict_max_seconds):
+            return Action.ESCALATE_NO_VERDICT
         return Action.WAIT
 
     # Nothing pushed, and the runner has no record of the job: the process
@@ -120,6 +141,15 @@ def next_action(state: RunState, config: Config) -> Action:
     if state.thread_status in _TERMINAL_THREAD_STATES:
         return Action.ESCALATE_PREPUSH
     return Action.WAIT
+
+
+def _seconds_waiting_for_verdict(state: RunState) -> float:
+    """How long the pushed commit has waited for CI: since it was declared, or
+    since the run started when the declaration time is unknown. The push cannot
+    predate the run, so the fallback only ever errs early, never forever."""
+    if state.seconds_since_push is not None:
+        return state.seconds_since_push
+    return state.elapsed_seconds
 
 
 def _fix_forward_budget_remaining(state: RunState, config: Config) -> bool:

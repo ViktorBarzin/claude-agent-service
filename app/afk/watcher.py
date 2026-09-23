@@ -21,10 +21,11 @@ and the fix-forward bookkeeping), one ``tick``:
   3. **act** on the returned ``Action``:
        * ``CLOSE_SUCCESS`` → ``tracker.close`` + drop the in-progress label +
          DONE checklist + ``done`` doorbell. The run landed.
-       * ``ESCALATE_PREPUSH`` / ``FREEZE_ESCALATE`` → drop the in-progress label,
-         add the ``ready-for-human`` label, post the checklist, ring the
-         ``needs-human`` / ``frozen`` doorbell. The run is handed to a human; the
-         issue is left OPEN (not closed) with the work in place.
+       * ``ESCALATE_PREPUSH`` / ``FREEZE_ESCALATE`` / ``ESCALATE_NO_VERDICT`` →
+         drop the in-progress label, add the ``ready-for-human`` label, post the
+         checklist, ring the ``needs-human`` / ``frozen`` / ``needs-human``
+         doorbell. The run is handed to a human; the issue is left OPEN (not
+         closed) with the work in place.
        * ``FIX_FORWARD`` → dispatch a corrective turn (``t3_client.dispatch``),
          bump the fix-forward attempt count, refresh the checklist, and keep the
          run in flight (NOT terminal: no label churn, no doorbell — the notifier
@@ -80,6 +81,7 @@ _TERMINAL_KIND_BY_ACTION: dict[Action, str] = {
     Action.CLOSE_SUCCESS: KIND_DONE,
     Action.ESCALATE_PREPUSH: KIND_NEEDS_HUMAN,
     Action.FREEZE_ESCALATE: KIND_FROZEN,
+    Action.ESCALATE_NO_VERDICT: KIND_NEEDS_HUMAN,
 }
 
 # Default label applied when a run is handed back to a human. Mirrors the
@@ -137,6 +139,9 @@ class InFlightRun:
     elapsed_seconds: float = 0.0
     #: Restarts already spent after the job went missing. See ``Config``.
     redispatch_attempts: int = 0
+    #: Seconds since ``commit`` was first declared, when the caller knows it.
+    #: Starts the clock on the wait for its CI verdict; see ``Config``.
+    seconds_since_push: float | None = None
 
 
 @dataclass
@@ -193,7 +198,8 @@ class Watcher:
 
         if action is Action.CLOSE_SUCCESS:
             return self._close_success(run, config)
-        if action in (Action.ESCALATE_PREPUSH, Action.FREEZE_ESCALATE):
+        if action in (Action.ESCALATE_PREPUSH, Action.FREEZE_ESCALATE,
+                      Action.ESCALATE_NO_VERDICT):
             return self._escalate(run, state, action, config)
         if action is Action.FIX_FORWARD:
             return self._fix_forward(run, state)
@@ -222,6 +228,7 @@ class Watcher:
             fix_forward_attempts=run.fix_forward_attempts,
             elapsed_seconds=run.elapsed_seconds,
             redispatch_attempts=run.redispatch_attempts,
+            seconds_since_push=run.seconds_since_push,
         )
 
     def _thread_status(self, thread_id: str) -> ThreadStatus | None:
@@ -260,7 +267,7 @@ class Watcher:
         self._tracker.add_label(
             run.issue.repo, run.issue.number, self._ready_for_human_label
         )
-        self._notify(run, action, _escalation_detail(action, state))
+        self._notify(run, action, _escalation_detail(action, state, run.commit))
         return _terminal(action, run)
 
     def _fix_forward(self, run: InFlightRun, state: RunState) -> TickResult:
@@ -389,8 +396,17 @@ def _phase_for(state: RunState) -> Phase:
     return Phase.CI
 
 
-def _escalation_detail(action: Action, state: RunState) -> str:
+def _escalation_detail(action: Action, state: RunState, commit: str | None = None) -> str:
     """Human-readable escalation reason for the doorbell + logs (never parsed)."""
+    if action is Action.ESCALATE_NO_VERDICT:
+        waited = (state.seconds_since_push if state.seconds_since_push is not None
+                  else state.elapsed_seconds)
+        return (
+            f"Pushed {commit or 'a commit'}, but CI has not reported on it "
+            f"{waited:.0f}s later and the turn is over "
+            f"(thread {state.thread_status.value if state.thread_status else 'unknown'}). "
+            "Handed back for a human to check its pipeline."
+        )
     if action is Action.ESCALATE_PREPUSH:
         return (
             "Agent stalled or errored before pushing any commit "

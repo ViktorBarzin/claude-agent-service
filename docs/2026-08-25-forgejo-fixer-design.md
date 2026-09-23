@@ -67,7 +67,7 @@ built with care by earlier work. Naming what each one already does:
 |---|---|
 | `claude-agent-exec` ClusterRole | Cluster-wide CRUD on pods, `pods/exec`, **secrets**, configmaps, services, PVCs, namespaces, events + apps/batch/networking + rbac roles/rolebindings. Its own comment: *"close to cluster-admin in blast radius"*. Every denial above sits inside it. |
 | `.claude/agents/issue-responder.md` | *"investigates, resolves if confident, escalates if complex"* — incident playbook (verify real → classify sev → restart/scale/fix TF → `tg plan` → `tg apply`) and feature playbook, with a written safety envelope, comment formats and a commit convention. |
-| `app/afk/run_state_machine.py` | `pushed + green → CLOSE_SUCCESS`; `pushed + red + budget → FIX_FORWARD`; budget out → `FREEZE_ESCALATE`; nothing pushed + thread dead → `ESCALATE_PREPUSH`. A pure function over a decision table. |
+| `app/afk/run_state_machine.py` | `pushed + green → CLOSE_SUCCESS`; `pushed + red + budget → FIX_FORWARD`; budget out → `FREEZE_ESCALATE`; nothing pushed + thread dead → `ESCALATE_PREPUSH`; pushed + turn over + no verdict past the ceiling → `ESCALATE_NO_VERDICT`. A pure function over a decision table. |
 | `app/afk/ci_watcher.py` | Folds GHA build → Woodpecker deploy → Keel rollout into one `PENDING`/`GREEN`/`RED` verdict, clients injected behind Protocols. |
 | `app/afk/dispatch_policy.py` | Trust gate → allowlist → **per-repo lock** → `blocked_by` → priority. At most one decision per repo. No IO. |
 | `app/afk/tracker.py` | Read/write port onto the tracker behind an injected client. Its decisions are forge-agnostic; `labeled_by_trusted` is fail-closed from the actor of the most recent label application. |
@@ -591,6 +591,41 @@ second run.
   it. The subprocess is killed in a `finally` now, the shape the streaming
   endpoint already used. This one never reached the fixer, which passes no
   timeout; it affected every other caller, which keeps the 2700s default.
+
+### A pushed run waited on a verdict that could not arrive
+
+infra#95 held the per-repo lock from 2026-09-13 to 09-23, with infra#97 and #99
+queued behind it. The run pushed `f69e3dcc` at 11:14 on 09-13 and declared it;
+the service pod was replaced at 11:15:50, so the job vanished; Woodpecker
+pipeline #2873 on that commit went green at 11:16:32. The tick was suspended at
+the time (the overnight freeze of 09-13) and resumed on 09-18. From then on every
+tick logged `turn=vanished commit=f69e3dcc... -> wait`.
+
+The restart on a lost job did not apply, and should not have: it covers a job
+lost before anything was pushed, and this run's work had landed. Two things kept
+the run waiting instead of closing:
+
+- **The CI adapter read only the newest 50 pipelines.** Woodpecker caps a page
+  at 50, and by 09-18 pipeline #2873 was on page 4. The adapter returned the same
+  "no pipeline yet" it returns for a commit pushed a moment ago, so the watcher
+  kept waiting. It now searches back up to 20 pages (1000 pipelines), stops at
+  the end of the history, and logs when it gives up so the two cases can be told
+  apart.
+- **Nothing ended a pushed run whose verdict never came.** Every exit from the
+  pushed branch needs a green or red verdict. A pipeline that never ran, one
+  stuck `blocked`, or one the adapter cannot find leaves the run waiting with the
+  lock held. `ESCALATE_NO_VERDICT` now hands the run to a human once the turn is
+  over and CI has not reported within `ci_verdict_max_seconds` (7200) of the
+  commit being declared. Over the 200 infra pipelines between 09-13 and 09-23 the
+  longest ran 31 minutes and the longest queue wait was 138 seconds. The clock
+  starts at the `Pushed-Commit:` comment, not the run's start, so a long
+  diagnosis is not charged against its pipeline. A `RUNNING` turn keeps its
+  deferral, and an unreachable runner is not treated as a finished turn.
+
+One observation from the same investigation, not addressed here: from the tick
+pods about 40% of `/jobs/{id}` fetches were refused at the Service address over
+2026-09-22/23 (309 of 713 watch ticks read `turn=unknown`), while 40 of 40
+requests from inside the service pod succeeded.
 
 ## Open questions
 
