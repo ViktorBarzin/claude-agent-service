@@ -622,10 +622,22 @@ the run waiting instead of closing:
   diagnosis is not charged against its pipeline. A `RUNNING` turn keeps its
   deferral, and an unreachable runner is not treated as a finished turn.
 
-One observation from the same investigation, not addressed here: from the tick
-pods about 40% of `/jobs/{id}` fetches were refused at the Service address over
-2026-09-22/23 (309 of 713 watch ticks read `turn=unknown`), while 40 of 40
-requests from inside the service pod succeeded.
+Two more defects came out of watching the unstuck queue run:
+
+- **The tick was an endpoint of the Service it calls.** Its pod template reused
+  the Service's selector labels and has no readiness probe, so each running
+  tick pod was a Ready endpoint. About half its own requests went to itself and
+  were refused: 309 of 713 watch ticks over 2026-09-22/23 read `turn=unknown`,
+  and some drains waited a tick. Requests from inside the service pod never
+  showed it, because they ran between ticks. The tick pods now carry
+  `app=fixer-tick` (infra `5a3dde6f`), and a tick caught running at 22:34:02
+  was absent from the Service's endpoints.
+- **A long CLI output line killed the run.** asyncio caps a subprocess line at
+  64 KiB by default, and the CLI's stream-json reports every Edit with the whole
+  original file. The infra#97 run edited `prometheus_chart_values.tpl`
+  (478 KB), the read raised "Separator is not found, and chunk exceed the
+  limit", and the job ended as `error` with the agent killed mid-edit. Every
+  reader of CLI output now accepts lines up to 64 MiB (`3050af5`).
 
 ## Open questions
 
