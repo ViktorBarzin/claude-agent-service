@@ -11,6 +11,14 @@ import os
 from subprocess import PIPE
 
 CONVERSATIONAL_AGENT = "conversational"
+
+#: The longest single line of CLI output a reader accepts. asyncio's default is
+#: 64 KiB, and one stream-json event is routinely longer: the CLI reports every
+#: Edit with the WHOLE original file in ``tool_use_result.originalFile``. A fixer
+#: run on infra#97 (2026-09-23) edited a 478 KB alerts file, the reader raised
+#: "Separator is not found, and chunk exceed the limit", and the job was marked
+#: error with the agent killed mid-edit. This is a ceiling, not an allocation.
+STREAM_LINE_LIMIT = 64 * 1024 * 1024
 # A spoken chat turn is short; a turn that runs longer than this is wedged.
 CONVERSATIONAL_TIMEOUT_SECONDS = int(
     os.environ.get("CONVERSATIONAL_TIMEOUT_SECONDS", "120")
@@ -93,7 +101,8 @@ async def run_turn(session_id: str, message: str, model: str) -> dict:
     resume = session_id in _started
     argv = conversational_argv(session_id, message, model, resume)
 
-    proc = await asyncio.create_subprocess_exec(*argv, stdout=PIPE, stderr=PIPE)
+    proc = await asyncio.create_subprocess_exec(*argv, stdout=PIPE, stderr=PIPE,
+                                                limit=STREAM_LINE_LIMIT)
     assert proc.stdout is not None and proc.stderr is not None
 
     output_lines: list[str] = []

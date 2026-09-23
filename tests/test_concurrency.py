@@ -316,3 +316,47 @@ async def test_a_normal_invocation_does_not_kill_an_already_finished_process():
 
     assert result["exit_code"] == 0
     assert state["killed"] == 0
+
+
+# --------------------------------------------------------------------------- #
+# One stream-json event can be far longer than asyncio's 64 KiB line default.
+#
+# infra#97, 2026-09-23: the CLI reports every Edit with the WHOLE original file
+# in the event (``tool_use_result.originalFile``), and the run edited
+# stacks/monitoring/.../prometheus_chart_values.tpl, which is 478 KB. The reader
+# raised "Separator is not found, and chunk exceed the limit", the job was
+# marked error, and the agent was killed mid-edit with its work unpushed.
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_an_event_longer_than_the_default_line_limit_is_read_whole(
+    tmp_path, monkeypatch
+):
+    import json as _json
+    import os
+    import stat
+    import sys
+
+    event = _json.dumps({"type": "user", "tool_use_result": {"originalFile": "x" * 600_000}})
+    fake = tmp_path / "bin" / "claude"
+    fake.parent.mkdir()
+    # One process, no children: a grandchild holding the pipe would keep a
+    # killed parent's wait() from returning, which is a different bug.
+    fake.write_text(
+        f"#!{sys.executable}\n"
+        "import os, sys\n"
+        "sys.stdout.write(open(os.environ['EVENT_FILE']).read() + '\\n')\n"
+        "sys.stdout.write('{\"type\":\"result\"}\\n')\n"
+    )
+    fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
+    (tmp_path / "event.json").write_text(event)
+    monkeypatch.setenv("PATH", f"{fake.parent}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("EVENT_FILE", str(tmp_path / "event.json"))
+
+    seen: list[str] = []
+    result = await app_main._invoke_claude_subprocess(
+        prompt="p", agent="a", max_budget_usd=None, workspace=str(tmp_path),
+        sink=seen.append,
+    )
+
+    assert result["exit_code"] == 0
+    assert [len(line.strip()) for line in seen] == [len(event), len('{"type":"result"}')]

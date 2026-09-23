@@ -322,6 +322,7 @@ async def _invoke_claude_subprocess(
         cwd=workspace,
         stdout=PIPE,
         stderr=PIPE,
+        limit=conversational.STREAM_LINE_LIMIT,
     )
 
     # stdout=PIPE / stderr=PIPE guarantee both streams are present.
@@ -682,6 +683,7 @@ async def chat_completions(
                     proc = await spawn(
                         *conversational.stream_argv(prompt, model),
                         cwd=workspace, stdout=PIPE, stderr=PIPE,
+                        limit=conversational.STREAM_LINE_LIMIT,
                     )
                     assert proc.stdout is not None
                     yield conversational.openai_chunk(
