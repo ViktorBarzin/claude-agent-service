@@ -1,25 +1,33 @@
-"""A tracker that refreshes the progress checklist instead of repeating it.
+"""A tracker that posts the progress checklist only when a box changes.
 
 ``watcher.tick`` posts a phase checklist on every tick, including a plain WAIT.
-That is the right intent — a reader should be able to see where a run is — but a
-tick runs every couple of minutes, so posting it as a new comment each time would
-bury the issue's real conversation under dozens of near-identical blocks.
+A tick runs every couple of minutes, so posting each one as a new comment would
+bury the issue's real conversation under near-identical blocks.
 
-This wrapper sits between the watcher and the tracker and makes the checklist
-idempotent: the first one is posted, and every later one edits that same comment.
-Everything that is not a checklist passes straight through, so the run's findings,
-escalations and resolutions are appended normally.
+This wrapper sits between the watcher and the tracker. A checklist is posted as a
+new comment only when its box states differ from the last checklist the bot
+posted on that issue; when they match, nothing is posted. Everything that is not
+a checklist passes straight through, so findings, escalations and resolutions are
+appended normally.
+
+It used to edit the previous checklist in place and post a new one if the edit
+failed. On infra#95 the PATCH returned 404 twelve times in two days while a GET
+of the same comment returned 200, and each fallback posted a fresh identical
+checklist, leaving 10 duplicates. Posting only on change needs no edit call, so
+that failure mode is gone.
 
 Identifying a checklist by its rendered heading keeps the coupling to one string
 that ``phase_checklist`` owns, rather than threading a flag through the watcher's
 signature.
 """
-import logging
+import re
 
 # ``phase_checklist.render`` titles its block "### <repo>#<issue> — AFK run progress".
 _CHECKLIST_MARKER = "AFK run progress"
 
-log = logging.getLogger(__name__)
+# One box line as ``phase_checklist`` renders it: "- [x] label", "- [~] label",
+# "- [ ] label".
+_BOX = re.compile(r"^- \[([x~ ])\] (.*)$")
 
 
 def is_checklist(body: str) -> bool:
@@ -28,8 +36,22 @@ def is_checklist(body: str) -> bool:
     return first_line.startswith("###") and _CHECKLIST_MARKER in first_line
 
 
+def box_states(body: str) -> list[tuple[str, str]]:
+    """The ordered ``(label, state)`` pairs of every box line in ``body``.
+
+    Every other line (the heading with its thread id, notes) is ignored, so two
+    checklists compare equal exactly when their boxes do.
+    """
+    out = []
+    for line in (body or "").splitlines():
+        match = _BOX.match(line.strip())
+        if match:
+            out.append((match.group(2).strip(), match.group(1)))
+    return out
+
+
 class ChecklistCollapsingTracker:
-    """Delegates to a tracker, collapsing repeated checklists into one comment."""
+    """Delegates to a tracker, dropping checklists whose boxes have not changed."""
 
     def __init__(self, inner, forgejo, bot_actor: str) -> None:
         self._inner = inner
@@ -61,28 +83,20 @@ class ChecklistCollapsingTracker:
 
     # ---------------------------------------------------------------- the point #
     def comment(self, repo, issue, body):
-        """Post ``body``, or edit the existing checklist when that is what it is."""
-        if not is_checklist(body):
-            self._inner.comment(repo, issue, body)
-            return
-        existing = self._find_checklist(repo, issue)
-        if existing is None:
-            self._inner.comment(repo, issue, body)
-            return
-        try:
-            self._forgejo.edit_comment(repo, existing, body)
-        except Exception as exc:
-            # An edit that fails must not lose the update: fall back to posting.
-            log.warning("checklist edit on %s#%s failed (%s) — posting instead",
-                        repo, issue, exc)
-            self._inner.comment(repo, issue, body)
+        """Post ``body``, unless it is a checklist whose boxes match the last one."""
+        if is_checklist(body):
+            last = self._last_checklist(repo, issue)
+            if last is not None and box_states(last) == box_states(body):
+                return
+        self._inner.comment(repo, issue, body)
 
-    def _find_checklist(self, repo, issue) -> int | None:
-        """The id of the bot's existing checklist comment, if there is one."""
+    def _last_checklist(self, repo, issue) -> str | None:
+        """The body of the bot's most recent checklist comment, if there is one."""
         for entry in reversed(self._forgejo.list_comments(repo, issue)):
             author = str((entry.get("user") or {}).get("login") or "")
             if author and author != self._bot:
                 continue
-            if is_checklist(str(entry.get("body") or "")):
-                return int(entry.get("id") or 0) or None
+            body = str(entry.get("body") or "")
+            if is_checklist(body):
+                return body
         return None
