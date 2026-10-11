@@ -18,7 +18,7 @@ from fastapi import FastAPI, HTTPException, Header
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from app import conversational
+from app import conversational, no_tools
 from app.fixer import config as fixer_config
 from app.fixer import receiver as fixer_receiver
 from app.fixer.runlog import RunLog
@@ -134,6 +134,10 @@ class ChatCompletionsRequest(BaseModel):
     max_tokens: int | None = None
     temperature: float | None = None
     stream: bool = False
+    # Opt-in sandbox for callers that relay untrusted text: no tools, no MCP,
+    # no infra clone. See app/no_tools.py. Ignored on the streaming path, which
+    # already runs the no-tools conversational agent.
+    no_tools: bool = False
     # Tolerate (and ignore) other OpenAI fields rather than 422-ing on them.
     model_config = {"extra": "allow"}
 
@@ -718,6 +722,9 @@ async def chat_completions(
 
         return StreamingResponse(event_stream(), media_type="text/event-stream")
 
+    if request.no_tools:
+        return await _no_tools_completion(request, model)
+
     image_urls = _inline_image_urls(request.messages)
 
     if not _reserve_queue_slot():
@@ -766,11 +773,12 @@ async def chat_completions(
             content={"error": "execution failed", "detail": detail},
         )
 
-    content = _extract_assistant_text(result["output"])
-    completion_id = "chatcmpl-" + uuid.uuid4().hex[:24]
+    return _completion_body(model, _extract_assistant_text(result["output"]))
 
+
+def _completion_body(model: str, content: str) -> dict:
     return {
-        "id": completion_id,
+        "id": "chatcmpl-" + uuid.uuid4().hex[:24],
         "object": "chat.completion",
         "created": int(time.time()),
         "model": model,
@@ -779,12 +787,40 @@ async def chat_completions(
             "message": {"role": "assistant", "content": content},
             "finish_reason": "stop",
         }],
-        "usage": {
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-            "total_tokens": 0,
-        },
+        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
     }
+
+
+async def _no_tools_completion(request: ChatCompletionsRequest, model: str):
+    """The ``no_tools`` branch of /v1/chat/completions: same queue, same
+    budget and timeout, none of the tools or the workspace."""
+    if not _reserve_queue_slot():
+        return JSONResponse(
+            status_code=503,
+            content={"error": "execution failed", "detail": "queue full"},
+        )
+    try:
+        async with _execution_slot():
+            text, error = await asyncio.wait_for(
+                no_tools.run(request.messages, model, OPENAI_COMPAT_BUDGET_USD),
+                timeout=OPENAI_COMPAT_TIMEOUT_SECONDS,
+            )
+    except asyncio.TimeoutError:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "execution failed", "detail": "agent timed out"},
+        )
+    except Exception as exc:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "execution failed", "detail": _one_line(str(exc))},
+        )
+    if error is not None:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "execution failed", "detail": _one_line(error)},
+        )
+    return _completion_body(model, text)
 
 
 @app.post("/v1/conversational")
