@@ -1,4 +1,4 @@
-FROM alpine:3.20
+FROM alpine:3.23
 
 # The homelab CLI, from its own published image. Without it the agent reaches for
 # `kubectl logs` on one pod when `homelab logs query` would search every service
@@ -10,12 +10,12 @@ FROM alpine:3.20
 # CGO-free in golang:alpine.
 COPY --from=ghcr.io/viktorbarzin/infra-cli:latest /app/infra_cli /usr/local/bin/homelab
 
-ARG TERRAFORM_VERSION=1.5.7
-ARG TERRAGRUNT_VERSION=0.99.4
-ARG SOPS_VERSION=3.9.4
-ARG KUBECTL_VERSION=1.34.0
-ARG BD_VERSION=1.0.2
-ARG VAULT_VERSION=1.20.4
+ARG TERRAFORM_VERSION=1.15.9
+ARG TERRAGRUNT_VERSION=0.99.5
+ARG SOPS_VERSION=3.13.3
+ARG KUBECTL_VERSION=1.35.9
+ARG BD_VERSION=1.0.4
+ARG VAULT_VERSION=1.21.4
 
 # System packages: infra tools + Python + Node.js (for Claude CLI).
 # gcompat/libc6-compat provide the glibc shim the bd binary links against.
@@ -29,7 +29,7 @@ RUN apk add --no-cache \
 # Terraform
 RUN curl -fsSL "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_amd64.zip" \
     -o /tmp/terraform.zip \
-    && unzip /tmp/terraform.zip -d /usr/local/bin/ \
+    && unzip /tmp/terraform.zip terraform -d /usr/local/bin/ \
     && rm /tmp/terraform.zip
 
 # Terragrunt
@@ -52,7 +52,7 @@ RUN curl -fsSL "https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/linux/amd64/ku
 # extraction (.gitignore excludes it). Pulling at build time is cleaner.
 RUN curl -fsSL "https://releases.hashicorp.com/vault/${VAULT_VERSION}/vault_${VAULT_VERSION}_linux_amd64.zip" \
     -o /tmp/vault.zip \
-    && unzip /tmp/vault.zip -d /usr/local/bin/ \
+    && unzip /tmp/vault.zip vault -d /usr/local/bin/ \
     && rm /tmp/vault.zip \
     && chmod +x /usr/local/bin/vault
 
