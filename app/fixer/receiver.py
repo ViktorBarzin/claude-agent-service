@@ -117,6 +117,12 @@ async def forgejo_hook(request: Request, response: Response) -> dict:
         )
         return {"ok": False, "reason": verdict.value}
 
+    if not continuing:
+        # The approval is verified, so the issue no longer waits on it, even if
+        # the run itself has to wait for the lock.
+        profiles.clear_on_approval(client, profile, delivery.repo, delivery.number,
+                                   delivery.labels)
+
     if _repo_locked(client, loop_cfg, delivery.repo, loop_cfg.in_progress_label):
         log.info(
             "forgejo hook: %s#%s deferred — a run already holds the repo",

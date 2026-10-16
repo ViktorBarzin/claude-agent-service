@@ -42,6 +42,7 @@ def test_infra_keeps_todays_values():
     assert p.ci_mode == profiles.CI_WOODPECKER
     assert p.comment_trigger is False
     assert p.playbook == profiles.PLAYBOOK_INFRA
+    assert p.cleared_on_approval == frozenset()
 
 
 def test_infra_follows_the_environment_overrides_it_always_had():
@@ -59,6 +60,7 @@ def test_f1_stream_takes_the_contracts_values():
     assert p.ci_mode == profiles.CI_NONE
     assert p.comment_trigger is True
     assert p.playbook == profiles.PLAYBOOK_F1
+    assert p.cleared_on_approval == frozenset({"needs-approval"})
 
 
 def test_an_unknown_repo_gets_the_infra_style_default():
@@ -247,11 +249,11 @@ def comment_payload(body="Use the backup feed.", labels=("approved", "needs-huma
     }
 
 
-def label_payload(sender="viktor") -> dict:
+def label_payload(sender="viktor", labels=("approved", "problem")) -> dict:
     return {
         "action": "label_updated",
         "issue": {"number": 5, "state": "open", "title": "Bahrain replay stops",
-                  "labels": [{"name": "approved"}, {"name": "problem"}]},
+                  "labels": [{"name": n} for n in labels]},
         "repository": {"name": F1, "full_name": "viktor/f1-stream"},
         "sender": {"login": sender},
     }
@@ -267,6 +269,29 @@ def test_viktors_approval_dispatches_the_f1_fixer(env, stub, submitted):
     assert ("add", F1, 5, "agent-in-progress") in stub.ops
     # Trust is fixed for f1-stream: the collaborator list is not consulted.
     assert stub.trusted_asked is False
+
+
+def test_viktors_approval_takes_needs_approval_off(env, stub, submitted):
+    post(label_payload(labels=("approved", "needs-approval", "idea")), "issues")
+    assert ("remove", F1, 5, "needs-approval") in stub.ops
+
+
+def test_an_approval_queued_behind_a_busy_repo_still_takes_needs_approval_off(
+        env, stub, submitted):
+    stub.in_progress = [{"number": 9, "labels": [{"name": "agent-in-progress"}]}]
+    r = post(label_payload(labels=("approved", "needs-approval")), "issues")
+    assert r.json()["reason"] == "repo-locked"
+    assert stub.ops == [("remove", F1, 5, "needs-approval")]
+
+
+def test_an_approval_without_needs_approval_removes_nothing(env, stub, submitted):
+    post(label_payload(), "issues")
+    assert not [op for op in stub.ops if op[0] == "remove"]
+
+
+def test_someone_elses_approval_leaves_needs_approval_on(env, stub, submitted):
+    post(label_payload(sender="ebarzin", labels=("approved", "needs-approval")), "issues")
+    assert stub.ops == []
 
 
 def test_a_collaborators_approval_does_not_dispatch(env, stub, submitted):
@@ -317,8 +342,9 @@ def test_a_reply_while_the_repo_is_busy_queues_the_issue_for_the_drain(env, stub
 def test_infra_dispatch_still_submits_without_an_agent(env, stub, submitted):
     body = label_payload()
     body["repository"] = {"name": "infra", "full_name": "viktor/infra"}
-    body["issue"]["labels"] = [{"name": "broken"}]
+    body["issue"]["labels"] = [{"name": "broken"}, {"name": "needs-approval"}]
     assert post(body, "issues").json()["reason"] == "dispatched"
+    assert ("remove", "infra", 5, "needs-approval") not in stub.ops
     assert submitted[0]["agent"] is None
     assert "Fix Forgejo issue viktor/infra#5" in submitted[0]["prompt"]
 
@@ -383,6 +409,43 @@ def test_the_dispatcher_sends_the_f1_prompt_and_agent():
     prompt, label, agent = sent[0]
     assert agent == "f1-feedback-fixer" and label == "f1-stream#5"
     assert "docs/issue-bar.md" in prompt
+
+
+def test_a_drained_f1_approval_takes_needs_approval_off():
+    """The drain starts approvals the webhook missed or deferred, so it clears
+    the label too, after the submission succeeds."""
+    removed: list[tuple] = []
+
+    class F:
+        def get_issue(self, repo, number):
+            return {"title": "t", "labels": [{"name": "approved"}, {"name": "needs-approval"}]}
+
+        def remove_label(self, repo, number, label):
+            removed.append((repo, number, label))
+
+    d = tick.FixerDispatcher(ExecuteClient(lambda p, label="", agent=None: "job-n",
+                                           lambda j: None), F(), cfg())
+    d.dispatch(F1, 5, "ignored")
+    assert removed == [(F1, 5, "needs-approval")]
+
+
+def test_a_failed_drain_submission_leaves_needs_approval_on():
+    removed: list[tuple] = []
+
+    class F:
+        def get_issue(self, repo, number):
+            return {"title": "t", "labels": [{"name": "needs-approval"}]}
+
+        def remove_label(self, repo, number, label):
+            removed.append((repo, number, label))
+
+    def submit(prompt, label="", agent=None):
+        raise RuntimeError("service down")
+
+    d = tick.FixerDispatcher(ExecuteClient(submit, lambda j: None), F(), cfg())
+    with pytest.raises(RuntimeError):
+        d.dispatch(F1, 5, "ignored")
+    assert removed == []
 
 
 def test_the_service_jobs_client_posts_the_agent_it_is_given(monkeypatch):

@@ -14,7 +14,8 @@ trigger.
 ``f1-stream`` follows the user-reports build contract
 (f1-stream ``docs/design/2026-10-16-user-reports-build-contract.md``):
 
-- ``approved`` dispatches, and only when Viktor applied it;
+- ``approved`` dispatches, and only when Viktor applied it; his approval takes
+  ``needs-approval`` off, whether the run starts now or waits for the drain;
 - ``f1-feedback-fixer`` runs with the f1-stream prompts;
 - the service does not follow CI: the agent watches the build and deploy itself,
   and the service only notices when the run ends;
@@ -22,6 +23,7 @@ trigger.
   ``tv-feedback-bot``) are ignored;
 - a reply comment from Viktor on an approved issue starts a continue turn.
 """
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 from app.afk.tracker import DEFAULT_TRUSTED_ASSOCIATIONS, Tracker
@@ -42,6 +44,7 @@ F1_TRIGGER_LABEL = "approved"
 F1_APPROVER = "viktor"
 F1_AGENT = "f1-feedback-fixer"
 F1_FEEDBACK_BOT = "tv-feedback-bot"
+F1_NEEDS_APPROVAL = "needs-approval"
 
 
 @dataclass(frozen=True)
@@ -51,6 +54,7 @@ class RepoProfile:
     ``trusted_actors`` of ``None`` means "the repo's collaborators and owner, as
     Forgejo reports them". ``agent`` of ``None`` means the service's configured
     agent (``FIXER_AGENT``), and is submitted without naming one, as before.
+    ``cleared_on_approval`` lists labels a verified trigger takes off the issue.
     """
 
     trigger_label: str
@@ -60,6 +64,7 @@ class RepoProfile:
     ci_mode: str
     comment_trigger: bool
     playbook: str
+    cleared_on_approval: frozenset[str] = frozenset()
 
 
 def profile_for(repo: str, cfg: FixerConfig) -> RepoProfile:
@@ -73,6 +78,7 @@ def profile_for(repo: str, cfg: FixerConfig) -> RepoProfile:
             ci_mode=CI_NONE,
             comment_trigger=True,
             playbook=PLAYBOOK_F1,
+            cleared_on_approval=frozenset({F1_NEEDS_APPROVAL}),
         )
     return RepoProfile(
         trigger_label=cfg.trigger_label,
@@ -83,6 +89,13 @@ def profile_for(repo: str, cfg: FixerConfig) -> RepoProfile:
         comment_trigger=False,
         playbook=PLAYBOOK_INFRA,
     )
+
+
+def clear_on_approval(client, profile: RepoProfile, repo: str, number: int,
+                      labels: Iterable[str]) -> None:
+    """Take the profile's ``cleared_on_approval`` labels off, if the issue has them."""
+    for label in sorted(profile.cleared_on_approval & frozenset(labels)):
+        client.remove_label(repo, number, label)
 
 
 # --------------------------------------------------------------------------- #

@@ -154,8 +154,15 @@ class FixerDispatcher:
         else:
             raise ValueError(f"unknown dispatch kind {kind!r}")
         if profile.agent is None:
-            return self._inner.dispatch(repo, issue, own)
-        return self._inner.dispatch(repo, issue, own, agent=profile.agent)
+            job_id = self._inner.dispatch(repo, issue, own)
+        else:
+            job_id = self._inner.dispatch(repo, issue, own, agent=profile.agent)
+        if kind == "first":
+            # After the submission, so a failed one leaves the issue as it was.
+            labels = [str((x or {}).get("name") or "")
+                      for x in issue_obj.get("labels") or []]
+            profiles.clear_on_approval(self._forgejo, profile, repo, issue, labels)
+        return job_id
 
     def snapshot(self) -> dict:
         return self._inner.snapshot()
