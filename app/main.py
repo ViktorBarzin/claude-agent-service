@@ -601,17 +601,18 @@ def start_job(request: ExecuteRequest) -> str:
     return job_id
 
 
-def _submit_fixer_job(prompt: str, issue: str = "") -> str:
+def _submit_fixer_job(prompt: str, issue: str = "", agent: str | None = None) -> str:
     """Start a fixer run. The agent and the (absent) ceilings come from config,
     so the receiver never has to know how the runner is invoked.
 
     ``issue`` names the run's log file, so a transcript is findable by the issue
-    it was for rather than only by an opaque job id.
+    it was for rather than only by an opaque job id. ``agent`` overrides the
+    configured one for a repo whose profile names its own (f1-stream).
     """
     cfg = fixer_config.from_env()
     return start_job(ExecuteRequest(
         prompt=prompt,
-        agent=cfg.agent,
+        agent=agent or cfg.agent,
         max_budget_usd=cfg.max_budget_usd,
         timeout_seconds=cfg.timeout_seconds,
         metadata={"source": "fixer", "issue": issue},

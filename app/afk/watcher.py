@@ -74,6 +74,11 @@ _THREAD_STATUS_BY_STRING: dict[str, ThreadStatus] = {
     "vanished": ThreadStatus.VANISHED,
 }
 
+def thread_status_for(state: str | None) -> ThreadStatus | None:
+    """A ``latestTurn.state`` string as a ``ThreadStatus``; ``None`` when unknown."""
+    return _THREAD_STATUS_BY_STRING.get(state) if state is not None else None
+
+
 # Action -> the terminal doorbell kind to ring. Only the terminal actions appear;
 # WAIT / FIX_FORWARD are non-terminal and ring nothing (the notifier rejects a
 # non-terminal kind on purpose — see ``notifier.TERMINAL_KINDS``).

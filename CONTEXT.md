@@ -118,6 +118,22 @@ reporter separately receives Forgejo's own email on every comment.
 _Avoid_: "notification" unqualified — the reporter's email and the owner's
 doorbell are different channels with different audiences.
 
+**Repo profile**:
+The fixer's settings for one enrolled repo (`app/fixer/profiles.py`): trigger
+label, who may trigger, agent, prompts, CI follow-through, ignored bot accounts
+and whether a reply comment starts a run. `infra` keeps the values above.
+`f1-stream` dispatches on `approved` from `viktor` only, runs
+`f1-feedback-fixer`, leaves CI to the agent, and continues on Viktor's reply
+(f1-stream's user-reports build contract).
+_Avoid_: "repo config" (the environment config is global; a profile is per repo).
+
+**Intake**:
+The f1-stream report intake (`POST /v1/intake/f1-report`, `app/intake.py`):
+one run of the `f1-report-intake` agent over a User report in a fresh f1-stream
+clone, with reading tools only, no settings files and a stripped environment.
+It returns a verdict; the f1-stream backend does every write. Not a fixer run.
+_Avoid_: "triage" (Viktor's approval is the triage).
+
 ## Relationships
 
 - The **Breakglass** UI is served by an in-cluster pod and reaches the

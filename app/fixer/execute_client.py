@@ -89,20 +89,28 @@ class ExecuteClient:
         # issue; empty is fine and the runner falls back to its own default.
         self.label = ""
 
-    def dispatch(self, repo: str, issue: int, prompt: str) -> str:
+    def dispatch(self, repo: str, issue: int, prompt: str, agent: str | None = None) -> str:
         """Start a run for ``repo#issue``; returns the job id.
 
         ``repo`` and ``issue`` are not passed to the runner — the prompt already
         names the issue, and ``/execute`` takes no routing fields. They are part
         of the port's signature, so they are accepted and used only for the
         error message if submission fails.
+
+        ``agent`` names the agent for a repo whose profile has its own. Without
+        it the submit is called exactly as before and the runner's default
+        agent applies.
         """
-        try:
-            job_id = self._submit(prompt, self.label or f"{repo}#{issue}")
-        except TypeError:
-            # A submit that takes only a prompt (older wiring, and the tests'
-            # simplest fake) still works — the label is a convenience.
-            job_id = self._submit(prompt)
+        label = self.label or f"{repo}#{issue}"
+        if agent is not None:
+            job_id = self._submit(prompt, label, agent)
+        else:
+            try:
+                job_id = self._submit(prompt, label)
+            except TypeError:
+                # A submit that takes only a prompt (older wiring, and the tests'
+                # simplest fake) still works — the label is a convenience.
+                job_id = self._submit(prompt)
         if not job_id:
             raise RuntimeError(f"dispatch for {repo}#{issue} returned no job id")
         self._dispatched.append(job_id)

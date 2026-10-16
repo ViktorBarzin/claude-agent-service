@@ -17,6 +17,13 @@ an issue already carrying ``agent-in-progress`` means a run holds the repo, and
 at most one run may hold it (design doc, decision 14). A delivery that arrives
 while the lock is held is dropped, not queued in memory — the next poller tick
 finds the issue still labelled ``broken`` and starts it when the lock frees.
+
+What counts as a trigger, who may pull it, which agent runs and with which
+prompt are per repo (:mod:`app.fixer.profiles`). On a repo with the comment
+trigger (f1-stream), a reply from the approver on an approved issue starts a
+continue turn carrying the reply. When the repo is busy, the reply takes
+``needs-human`` off instead, which is what puts the issue back in the drain's
+queue for when the lock frees.
 """
 import logging
 import time
@@ -24,7 +31,7 @@ import time
 from fastapi import APIRouter, Request, Response
 
 from app.fixer import config as fixer_config
-from app.fixer import gates, prompts, signature
+from app.fixer import gates, profiles, signature
 from app.fixer.forgejo import ForgejoClient
 from app.fixer.runstate import RunRecord, render_comment
 
@@ -32,7 +39,8 @@ log = logging.getLogger(__name__)
 
 router = APIRouter()
 
-#: Set by ``main`` at startup: (submit_prompt) -> job_id. Injected rather than
+#: Set by ``main`` at startup: (prompt, issue[, agent]) -> job_id. ``agent`` is
+#: passed only for a repo whose profile names one. Injected rather than
 #: imported so the receiver never reaches into the job runner's internals, and so
 #: the tests drive it with a recorder.
 _submit = None
@@ -84,17 +92,25 @@ async def forgejo_hook(request: Request, response: Response) -> dict:
         return {"ok": False, "reason": "not-an-issue-event"}
 
     client = _client(cfg)
-    trusted = client.trusted_actors(delivery.repo) if delivery.repo else frozenset()
+    profile = profiles.profile_for(delivery.repo, cfg)
+    if profile.trusted_actors is not None:
+        trusted = profile.trusted_actors
+    else:
+        trusted = client.trusted_actors(delivery.repo) if delivery.repo else frozenset()
 
     verdict = gates.decide(
         delivery,
         loop_cfg,
-        trigger_label=cfg.trigger_label,
-        bot_actor=cfg.bot_actor,
+        trigger_label=profile.trigger_label,
+        bot_actor=profile.ignored_actors,
         trusted_actors=trusted,
         paused_label=cfg.paused_label,
+        comment_trigger=profile.comment_trigger,
+        in_progress_label=loop_cfg.in_progress_label,
     )
-    if verdict is not gates.Verdict.DISPATCH:
+    continuing = verdict is gates.Verdict.CONTINUE
+    needs_human = cfg.human_label in delivery.labels
+    if verdict is not gates.Verdict.DISPATCH and not continuing:
         log.info(
             "forgejo hook: %s#%s refused by gate %s (actor=%s action=%s)",
             delivery.repo, delivery.number, verdict.value, delivery.actor, delivery.action,
@@ -106,39 +122,48 @@ async def forgejo_hook(request: Request, response: Response) -> dict:
             "forgejo hook: %s#%s deferred — a run already holds the repo",
             delivery.repo, delivery.number,
         )
+        if continuing and needs_human:
+            # The drain skips issues a human holds; releasing it queues the reply.
+            client.remove_label(delivery.repo, delivery.number, cfg.human_label)
         return {"ok": False, "reason": "repo-locked"}
 
     issue = client.get_issue(delivery.repo, delivery.number)
-    prompt = prompts.first_turn(
+    common = dict(
         owner=cfg.owner,
         repo=delivery.repo,
         number=delivery.number,
         title=str(issue.get("title") or ""),
         issue_url=cfg.issue_url(delivery.repo, delivery.number),
-        trigger_label=cfg.trigger_label,
     )
+    if continuing:
+        prompt = profiles.continue_turn(profile, **common, reply=delivery.body)
+    else:
+        prompt = profiles.first_turn(profile, **common)
 
     if _submit is None:  # pragma: no cover - wiring error, not a runtime path
         response.status_code = 503
         return {"ok": False, "reason": "no-submitter"}
 
-    job_id = _submit(prompt, f"{delivery.repo}#{delivery.number}")
+    label = f"{delivery.repo}#{delivery.number}"
+    if profile.agent is None:
+        job_id = _submit(prompt, label)
+    else:
+        job_id = _submit(prompt, label, profile.agent)
     record = RunRecord(job_id=job_id, started_at=time.time())
 
     # Label AFTER a successful dispatch, so a submission that raises never leaves
     # a phantom lock freezing the repo — the same ordering poller.py uses.
     client.add_label(delivery.repo, delivery.number, loop_cfg.in_progress_label)
-    client.comment(
-        delivery.repo,
-        delivery.number,
-        render_comment(
-            f"Picked this up — investigating. I will report what I find here, "
-            f"including anything I cannot fix.\n\n"
-            f"_Fixer run `{job_id}`._",
-            record,
-        ),
-    )
-    log.info("forgejo hook: dispatched %s#%s as job %s",
-             delivery.repo, delivery.number, job_id)
-    return {"ok": True, "reason": "dispatched", "job_id": job_id,
-            "issue": f"{delivery.repo}#{delivery.number}"}
+    if continuing:
+        if needs_human:
+            client.remove_label(delivery.repo, delivery.number, cfg.human_label)
+        visible = f"Picked up Viktor's reply, continuing.\n\n_Fixer run `{job_id}`._"
+    else:
+        visible = (f"Picked this up — investigating. I will report what I find here, "
+                   f"including anything I cannot fix.\n\n"
+                   f"_Fixer run `{job_id}`._")
+    client.comment(delivery.repo, delivery.number, render_comment(visible, record))
+    reason = "continued" if continuing else "dispatched"
+    log.info("forgejo hook: %s %s#%s as job %s",
+             reason, delivery.repo, delivery.number, job_id)
+    return {"ok": True, "reason": reason, "job_id": job_id, "issue": label}

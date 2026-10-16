@@ -9,6 +9,9 @@ common case. This module covers the two things a webhook cannot:
   * **Following through.** A run's commit has to be watched to green, and a red
     pipeline has to become a corrective turn. That is ``watcher.tick`` per
     in-flight issue, with the run's bookkeeping read from the issue footer.
+    A repo whose profile has no CI follow-through (f1-stream) is watched only
+    for the run's end: the lock is released, and an issue left open without a
+    person on it is handed to one.
 
 Run as a CronJob against the service's own HTTP API. It holds no state of its
 own: everything it needs is in the tracker (the ``agent-in-progress`` label) and
@@ -25,14 +28,14 @@ import urllib.error
 import urllib.request
 
 from app.afk.ci_watcher import StageResult  # noqa: F401  (documents the CI contract)
-from app.afk.notifier import Notifier
+from app.afk import run_state_machine
+from app.afk.notifier import KIND_NEEDS_HUMAN, Notifier
 from app.afk.phase_checklist import FIXER_LABELS
 from app.afk.poller import Poller
-from app.afk.tracker import Tracker
-from app.afk.types import Action, Config
-from app.afk.watcher import InFlightRun, Watcher
+from app.afk.types import Action, Config, Issue, RunState, ThreadStatus
+from app.afk.watcher import InFlightRun, TickResult, Watcher, thread_status_for
 from app.fixer import config as fixer_config
-from app.fixer import ntfy, prompts
+from app.fixer import ntfy, profiles
 from app.fixer.checklist_tracker import ChecklistCollapsingTracker
 from app.fixer.execute_client import UNREACHABLE, ExecuteClient
 from app.fixer.forgejo import ForgejoClient
@@ -71,8 +74,8 @@ class ServiceJobs:
             raw = resp.read()
             return json.loads(raw) if raw else {}
 
-    def submit(self, prompt: str, issue: str = "") -> str:
-        payload: dict = {"prompt": prompt, "agent": self._agent,
+    def submit(self, prompt: str, issue: str = "", agent: str | None = None) -> str:
+        payload: dict = {"prompt": prompt, "agent": agent or self._agent,
                          "metadata": {"source": "fixer-tick", "issue": issue}}
         # Omit the ceilings entirely when unset, so the service's own optional
         # defaults apply rather than a value invented here.
@@ -132,6 +135,7 @@ class FixerDispatcher:
         established.
         """
         self._inner.label = f"{repo}#{issue}"
+        profile = profiles.profile_for(repo, self._cfg)
         issue_obj = self._forgejo.get_issue(repo, issue)
         common = dict(
             owner=self._cfg.owner, repo=repo, number=issue,
@@ -139,19 +143,19 @@ class FixerDispatcher:
             issue_url=self._cfg.issue_url(repo, issue),
         )
         if kind == "first":
-            own = prompts.first_turn(
-                **common, trigger_label=self._cfg.trigger_label
-            )
+            own = profiles.first_turn(profile, **common)
         elif kind == "fix_forward":
             bodies = [str(c.get("body") or "")
                       for c in self._forgejo.list_comments(repo, issue)]
             record = latest_record(bodies) or RunRecord(job_id="", started_at=0.0)
-            own = prompts.fix_forward_turn(**common, record=record)
+            own = profiles.fix_forward_turn(profile, **common, record=record)
         elif kind == "redispatch":
-            own = prompts.redispatch_turn(**common)
+            own = profiles.redispatch_turn(profile, **common)
         else:
             raise ValueError(f"unknown dispatch kind {kind!r}")
-        return self._inner.dispatch(repo, issue, own)
+        if profile.agent is None:
+            return self._inner.dispatch(repo, issue, own)
+        return self._inner.dispatch(repo, issue, own, agent=profile.agent)
 
     def snapshot(self) -> dict:
         return self._inner.snapshot()
@@ -163,8 +167,10 @@ class FixerDispatcher:
 def build(cfg: fixer_config.FixerConfig, service_url: str, service_token: str):
     """Wire the real adapters. Returns everything a tick needs."""
     forgejo = ForgejoClient(cfg.forgejo_api, cfg.token, cfg.owner)
+    # Each repo is read by its own trigger label and trust rule; infra's are
+    # the ones this tracker always had.
     tracker = ChecklistCollapsingTracker(
-        Tracker(forgejo, ready_label=cfg.trigger_label), forgejo, cfg.bot_actor,
+        profiles.RepoTrackers(forgejo, cfg), forgejo, cfg.bot_actor,
     )
     jobs = ServiceJobs(service_url, service_token, cfg.agent, cfg)
     dispatcher = FixerDispatcher(ExecuteClient(jobs.submit, jobs.fetch), forgejo, cfg)
@@ -233,24 +239,16 @@ def watch(forgejo, tracker, dispatcher, notifier, loop_cfg: Config, cfg) -> list
     )
     lines: list[str] = []
     for repo in loop_cfg.allowlist:
+        if profiles.profile_for(repo, cfg).ci_mode == profiles.CI_NONE:
+            lines.extend(_watch_run_end(forgejo, dispatcher, notifier, loop_cfg, cfg, repo))
+            continue
         for raw in forgejo.list_issues(repo, loop_cfg.in_progress_label):
             number = int(raw.get("number") or 0)
             comments = forgejo.list_comments(repo, number)
             bodies = [str(c.get("body") or "") for c in comments]
             record = latest_record(bodies)
             if record is None:
-                # An in-progress label with no footer behind it: nothing here can
-                # drive it, so hand it over rather than leaving it parked.
-                forgejo.remove_label(repo, number, loop_cfg.in_progress_label)
-                forgejo.add_label(repo, number, cfg.human_label)
-                forgejo.comment(repo, number, (
-                    "This was marked in progress but carries no run state, so "
-                    "no tick can follow it through. Handing it over.\n\n"
-                    "One thing to check before assuming nothing happened: the "
-                    "lock is stamped before the run's state is recorded, so a "
-                    "job may still be running for this issue and may still "
-                    "push. Search the service logs for this issue number "
-                    "before starting again."))
+                _hand_over_orphan(forgejo, repo, number, loop_cfg, cfg)
                 lines.append(f"{repo}#{number}: orphaned, escalated")
                 continue
 
@@ -286,6 +284,139 @@ def watch(forgejo, tracker, dispatcher, notifier, loop_cfg: Config, cfg) -> list
                      observed_turn=state, human_label=cfg.human_label)
             lines.append(f"{repo}#{number}: {result.action.value}")
     return lines
+
+
+def _hand_over_orphan(forgejo, repo: str, number: int, loop_cfg: Config, cfg) -> None:
+    """An in-progress label with no footer behind it: nothing here can drive
+    it, so hand it over rather than leaving it parked."""
+    forgejo.remove_label(repo, number, loop_cfg.in_progress_label)
+    forgejo.add_label(repo, number, cfg.human_label)
+    forgejo.comment(repo, number, (
+        "This was marked in progress but carries no run state, so "
+        "no tick can follow it through. Handing it over.\n\n"
+        "One thing to check before assuming nothing happened: the "
+        "lock is stamped before the run's state is recorded, so a "
+        "job may still be running for this issue and may still "
+        "push. Search the service logs for this issue number "
+        "before starting again."))
+
+
+#: First line of the comment a run posts when it pushes a fix (f1-stream).
+FIX_SHIPPED_PREFIX = "Fix shipped:"
+
+_NO_FIX_HANDOVER = ("The run ended without shipping a fix or asking a question; "
+                    "over to Viktor.")
+_OPEN_AFTER_FIX_HANDOVER = (
+    "The run shipped a fix but ended with the issue still open and without "
+    "asking for anything; over to Viktor to confirm the fix works. Left as it "
+    "was, the queue would start this issue again.")
+
+
+def _watch_run_end(forgejo, dispatcher, notifier, loop_cfg: Config, cfg,
+                   repo: str) -> list[str]:
+    """Drive a repo the service does not follow CI for: watch for the run's end.
+
+    The agent follows its own build and deploy, so the only thing left to the
+    service is the lock and the hand-over. While the job runs (or the runner
+    cannot be asked) nothing happens. A job lost with nothing done restarts
+    once, as on infra. Otherwise the run is over: the lock is released, and an
+    issue still open with no one holding it goes to Viktor, because the drain
+    would otherwise start it again on the next tick.
+    """
+    lines: list[str] = []
+    now = time.time()
+    for raw in forgejo.list_issues(repo, loop_cfg.in_progress_label):
+        number = int(raw.get("number") or 0)
+        comments = forgejo.list_comments(repo, number)
+        record = latest_record([str(c.get("body") or "") for c in comments])
+        if record is None:
+            _hand_over_orphan(forgejo, repo, number, loop_cfg, cfg)
+            lines.append(f"{repo}#{number}: orphaned, escalated")
+            continue
+        state = RunState(
+            thread_status=_turn_status(dispatcher, record.job_id),
+            ci_status=None,
+            pushed=False,
+            fix_forward_attempts=record.fix_forward_attempts,
+            elapsed_seconds=record.elapsed_seconds(now),
+            redispatch_attempts=record.redispatch_attempts,
+        )
+        action = run_state_machine.next_action(state, loop_cfg)
+        shipped = _fix_shipped_since(comments, cfg.bot_actor, record.started_at)
+        if action is Action.REDISPATCH and not shipped:
+            new_job = dispatcher.dispatch(repo, number, "", kind="redispatch")
+            _persist(forgejo, repo, number, record,
+                     TickResult(action=Action.REDISPATCH, terminal=False, thread_id=new_job,
+                                fix_forward_attempts=record.fix_forward_attempts,
+                                redispatch_attempts=record.redispatch_attempts + 1),
+                     None, human_label=cfg.human_label)
+            lines.append(f"{repo}#{number}: redispatch")
+            continue
+        if action is Action.WAIT:
+            lines.append(f"{repo}#{number}: wait")
+            continue
+        lines.append(_end_run(forgejo, notifier, loop_cfg, cfg, repo, raw, record, shipped))
+    for raw in forgejo.list_issues(repo, loop_cfg.in_progress_label, state="closed"):
+        # The agent closes the issue itself once the fix is proven live, which
+        # takes the issue out of the list above with the lock still on it.
+        number = int(raw.get("number") or 0)
+        record = latest_record([str(c.get("body") or "")
+                                for c in forgejo.list_comments(repo, number)])
+        if record is not None and _turn_status(dispatcher, record.job_id) in (
+                None, ThreadStatus.RUNNING):
+            continue
+        forgejo.remove_label(repo, number, loop_cfg.in_progress_label)
+        lines.append(f"{repo}#{number}: closed, lock released")
+    return lines
+
+
+def _turn_status(dispatcher, job_id: str):
+    """The job's turn as a ``ThreadStatus``, or ``None`` when the runner could
+    not say (which the state machine reads as "keep waiting")."""
+    dispatcher.track(job_id)
+    state = next((t.get("latestTurn", {}).get("state")
+                  for t in dispatcher.snapshot().get("threads", [])
+                  if t.get("id") == job_id), None)
+    return thread_status_for(state)
+
+
+def _fix_shipped_since(comments: list[dict], author: str, started_at: float) -> bool:
+    """Whether ``author`` posted a "Fix shipped:" comment since the run started.
+
+    A comment whose time cannot be read counts: Forgejo always sends one, and
+    reading a garbled stamp as "before the run" would page Viktor for a run that
+    did ship.
+    """
+    for comment in comments:
+        if str((comment.get("user") or {}).get("login") or "") != author:
+            continue
+        lines = str(comment.get("body") or "").strip().splitlines()
+        if not lines or not lines[0].startswith(FIX_SHIPPED_PREFIX):
+            continue
+        at = _epoch(comment.get("created_at"))
+        if at is None or at >= started_at:
+            return True
+    return False
+
+
+def _end_run(forgejo, notifier, loop_cfg: Config, cfg, repo: str, raw: dict,
+             record: RunRecord, shipped: bool) -> str:
+    """The run is over: release the lock, and hand an unheld open issue over."""
+    number = int(raw.get("number") or 0)
+    forgejo.remove_label(repo, number, loop_cfg.in_progress_label)
+    labels = [str(lbl.get("name")) for lbl in raw.get("labels") or [] if lbl.get("name")]
+    if cfg.human_label in labels:
+        return f"{repo}#{number}: ended, with a human"
+    text = _OPEN_AFTER_FIX_HANDOVER if shipped else _NO_FIX_HANDOVER
+    forgejo.add_label(repo, number, cfg.human_label)
+    forgejo.comment(repo, number, f"{text}\n\n_Fixer run `{record.job_id}`._")
+    notifier.notify(KIND_NEEDS_HUMAN,
+                    Issue(number=number, repo=repo, labels=labels, blocked_by=[],
+                          labeled_by_trusted=True, priority=0),
+                    record.job_id, text)
+    if shipped:
+        return f"{repo}#{number}: ended after a fix shipped, handed over"
+    return f"{repo}#{number}: ended without a fix, handed over"
 
 
 def _declared_at(comments: list[dict], commit: str | None,

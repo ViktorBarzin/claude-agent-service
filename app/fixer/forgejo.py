@@ -94,9 +94,10 @@ class ForgejoClient:
             return None
 
     # -------------------------------------------------- the tracker port #
-    def list_issues(self, repo: str, label: str) -> list[dict]:
-        """Open issues carrying ``label``. Pull requests are excluded."""
-        q = urllib.parse.urlencode({"state": "open", "labels": label, "limit": 100})
+    def list_issues(self, repo: str, label: str, state: str = "open") -> list[dict]:
+        """Issues carrying ``label``, open unless ``state`` says otherwise. Pull
+        requests are excluded."""
+        q = urllib.parse.urlencode({"state": state, "labels": label, "limit": 100})
         raw = self._call("GET", f"/repos/{self._slug(repo)}/issues?{q}") or []
         return [i for i in raw if not i.get("pull_request")]
 
