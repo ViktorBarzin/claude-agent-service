@@ -95,6 +95,10 @@ COPY agents/beads-task-runner.md /usr/share/agent-seed/beads-task-runner.md
 COPY agents/recruiter-triage.md /usr/share/agent-seed/recruiter-triage.md
 COPY agents/nextcloud-todos-planner.md /usr/share/agent-seed/nextcloud-todos-planner.md
 COPY agents/nextcloud-todos-exec.md /usr/share/agent-seed/nextcloud-todos-exec.md
+# The f1-stream report intake. app/intake.py reads it from here and defines the
+# agent on the command line, so the run loads no settings file that could widen
+# its tools; it does not need to be copied into ~/.claude/agents.
+COPY agents/f1-report-intake.md /usr/share/agent-seed/f1-report-intake.md
 # The breakglass deployment (separate stack) seeds this one instead of the
 # untrusted-input agents; its init container copies whichever it needs.
 COPY agents/breakglass.md /usr/share/agent-seed/breakglass.md

@@ -18,7 +18,7 @@ from fastapi import FastAPI, HTTPException, Header
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from app import conversational, no_tools
+from app import conversational, intake, no_tools
 from app.fixer import config as fixer_config
 from app.fixer import receiver as fixer_receiver
 from app.fixer.runlog import RunLog
@@ -619,6 +619,7 @@ def _submit_fixer_job(prompt: str, issue: str = "") -> str:
 
 
 app.include_router(fixer_receiver.router)
+app.include_router(intake.router)
 fixer_receiver.set_submitter(_submit_fixer_job)
 
 
