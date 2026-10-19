@@ -10,12 +10,12 @@ FROM alpine:3.23
 # CGO-free in golang:alpine.
 COPY --from=ghcr.io/viktorbarzin/infra-cli:latest /app/infra_cli /usr/local/bin/homelab
 
-ARG TERRAFORM_VERSION=1.15.9
-ARG TERRAGRUNT_VERSION=0.99.5
+ARG TERRAFORM_VERSION=1.16.6
+ARG TERRAGRUNT_VERSION=1.1.6
 ARG SOPS_VERSION=3.13.3
 ARG KUBECTL_VERSION=1.35.9
 ARG BD_VERSION=1.0.4
-ARG VAULT_VERSION=1.21.4
+ARG VAULT_VERSION=2.2.0
 
 # System packages: infra tools + Python + Node.js (for Claude CLI).
 # gcompat/libc6-compat provide the glibc shim the bd binary links against.
