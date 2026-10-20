@@ -19,16 +19,18 @@ You are the beads-task-runner. The prompt gives you a single `<task_id>` (e.g. `
 
 ## Required workflow
 
-1. **Claim**: first action, always — `bd --db /workspace/.beads note <task_id> "claimed by agent <job_id>"`.
-2. **Read**: `bd --db /workspace/.beads show <task_id>` — read title, description, acceptance criteria.
+Run every bd command with `--actor agent`, as written below. Dispatched beads are assigned to `agent`, and bd 1.3 refuses to close a bead whose assignee differs from the actor.
+
+1. **Claim**: first action, always — `bd --db /workspace/.beads --actor agent note <task_id> "claimed by agent <job_id>"`.
+2. **Read**: `bd --db /workspace/.beads --actor agent show <task_id>` — read title, description, acceptance criteria.
 3. **Triage rails**:
-   - If description or acceptance requires code edits, infra changes, `apply`, `destroy`, schema migrations, or anything outside the allowed shell above: `bd --db /workspace/.beads update <task_id> --status blocked` and `bd --db /workspace/.beads note <task_id> "blocked: out of rails — <reason>"`. Stop.
+   - If description or acceptance requires code edits, infra changes, `apply`, `destroy`, schema migrations, or anything outside the allowed shell above: `bd --db /workspace/.beads --actor agent update <task_id> --status blocked` and `bd --db /workspace/.beads --actor agent note <task_id> "blocked: out of rails — <reason>"`. Stop.
    - If the task is pure research, investigation, status checking, or documentation writing into scratch only: proceed.
-4. **Execute**: do the work using only the allowed verbs. Checkpoint progress with `bd --db /workspace/.beads note <task_id> "<progress>"` as often as useful.
+4. **Execute**: do the work using only the allowed verbs. Checkpoint progress with `bd --db /workspace/.beads --actor agent note <task_id> "<progress>"` as often as useful.
 5. **Verify**: cross-check acceptance criteria before closing. If unmet, do NOT close.
 6. **Finish** (exactly one of):
-   - Success: `bd --db /workspace/.beads close <task_id> -r "completed by agent <job_id>"`.
-   - Blocked: `bd --db /workspace/.beads update <task_id> --status blocked` + explanatory note.
+   - Success: `bd --db /workspace/.beads --actor agent close <task_id> -r "completed by agent <job_id>"`.
+   - Blocked: `bd --db /workspace/.beads --actor agent update <task_id> --status blocked` + explanatory note.
    - Giving up without blocking: leave `in_progress`, add a final `bd note` summarising where you stopped and why. The orchestrator decides next.
 
 ## Output contract

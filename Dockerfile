@@ -1,3 +1,21 @@
+# bd (beads CLI), built from source against musl. The release tarballs are
+# glibc builds, and since 1.3.0 they need fcntl64, which gcompat does not
+# provide ("Error relocating /usr/local/bin/bd: fcntl64: symbol not found").
+# CGO stays on, as upstream's release build has it, so embedded Dolt still
+# works; gms_pure_go is upstream's release build tag.
+#
+# A BD_VERSION bump changes the schema the shared beads database needs. Read
+# the release notes and docs/runbooks/beads-bd-upgrade.md in the infra repo
+# before changing it: every bd client on the server has to move together.
+FROM golang:1.26.9-alpine3.23 AS bd
+ARG BD_VERSION=1.3.1
+ARG BD_COMMIT=c1c4b642ac1c08d8c828007a1c2f96e47e43ef7c
+RUN apk add --no-cache gcc g++ musl-dev git \
+    && CGO_ENABLED=1 GOBIN=/out go install -tags gms_pure_go \
+       -ldflags "-s -w -X main.Version=${BD_VERSION} -X main.Build=$(echo ${BD_COMMIT} | cut -c1-9) -X main.Commit=${BD_COMMIT}" \
+       "github.com/steveyegge/beads/cmd/bd@v${BD_VERSION}" \
+    && /out/bd version
+
 FROM alpine:3.23
 
 # The homelab CLI, from its own published image. Without it the agent reaches for
@@ -14,11 +32,12 @@ ARG TERRAFORM_VERSION=1.16.6
 ARG TERRAGRUNT_VERSION=1.1.6
 ARG SOPS_VERSION=3.13.3
 ARG KUBECTL_VERSION=1.35.9
-ARG BD_VERSION=1.0.4
 ARG VAULT_VERSION=2.2.0
 
 # System packages: infra tools + Python + Node.js (for Claude CLI).
-# gcompat/libc6-compat provide the glibc shim the bd binary links against.
+# gcompat/libc6-compat were added for bd's glibc release binary. bd is now
+# built against musl in the first stage; the shim stays for any other
+# glibc-linked tool.
 RUN apk add --no-cache \
     bash curl git git-crypt jq openssh-client openssl unzip \
     python3 py3-pip \
@@ -59,14 +78,12 @@ RUN curl -fsSL "https://releases.hashicorp.com/vault/${VAULT_VERSION}/vault_${VA
 # Claude Code CLI
 RUN npm install -g @anthropic-ai/claude-code
 
-# bd (beads CLI). Upstream github.com/steveyegge/beads redirects to gastownhall/beads
-# and publishes release tarballs — there is no bare `bd_linux_amd64` asset.
-# The binary is glibc-linked; gcompat+libc6-compat installed above provide the shim.
-RUN curl -fsSL "https://github.com/gastownhall/beads/releases/download/v${BD_VERSION}/beads_${BD_VERSION}_linux_amd64.tar.gz" \
-    -o /tmp/beads.tar.gz \
-    && tar -xzf /tmp/beads.tar.gz -C /tmp \
-    && install -m 0755 /tmp/bd /usr/local/bin/bd \
-    && rm -rf /tmp/beads.tar.gz /tmp/bd
+# bd (beads CLI), from the musl build stage at the top of this file.
+COPY --from=bd /out/bd /usr/local/bin/bd
+# bd 1.3 sends anonymous usage metrics to gastownhall-eventsapi.com unless this
+# is set. Every bd run in this image (agent runs, the beads-dispatcher and
+# beads-reaper CronJobs, claude-breakglass) inherits it.
+ENV BD_DISABLE_METRICS=1
 
 # Non-root user (Claude CLI blocks --dangerously-skip-permissions as root)
 RUN addgroup -g 1000 agent && adduser -u 1000 -G agent -h /home/agent -s /bin/bash -D agent
