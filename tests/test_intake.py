@@ -67,9 +67,9 @@ def _body(**files) -> dict:
 # --------------------------------------------------------------------------- #
 def test_an_unset_token_refuses_everything_with_503(client, monkeypatch):
     monkeypatch.delenv(intake.ENV_TOKEN)
-    r = client.post("/v1/intake/f1-report", json=_body(), headers=_auth(""))
+    r = client.post("/v1/intake/tv-report", json=_body(), headers=_auth(""))
     assert r.status_code == 503
-    r = client.get("/v1/intake/f1-report/abc", headers=_auth(""))
+    r = client.get("/v1/intake/tv-report/abc", headers=_auth(""))
     assert r.status_code == 503
 
 
@@ -77,14 +77,14 @@ def test_an_unset_token_refuses_everything_with_503(client, monkeypatch):
                                      {"Authorization": TOKEN}])
 def test_a_wrong_or_missing_token_is_401(client, headers):
     with patch.object(intake, "start") as start:
-        r = client.post("/v1/intake/f1-report", json=_body(), headers=headers)
+        r = client.post("/v1/intake/tv-report", json=_body(), headers=headers)
     assert r.status_code == 401
     start.assert_not_called()
 
 
 def test_the_execute_token_does_not_open_the_intake(client):
     """The backend holds only the intake token; the global one is not a key here."""
-    r = client.post("/v1/intake/f1-report", json=_body(),
+    r = client.post("/v1/intake/tv-report", json=_body(),
                     headers=_auth(os.environ["API_BEARER_TOKEN"]))
     assert r.status_code == 401
 
@@ -92,8 +92,8 @@ def test_the_execute_token_does_not_open_the_intake(client):
 def test_the_status_endpoint_needs_the_token_too(client):
     intake.records["job1"] = {"status": "running", "result": "", "error": "",
                               "finished_epoch": None}
-    assert client.get("/v1/intake/f1-report/job1").status_code == 401
-    assert client.get("/v1/intake/f1-report/job1", headers=_auth()).status_code == 200
+    assert client.get("/v1/intake/tv-report/job1").status_code == 401
+    assert client.get("/v1/intake/tv-report/job1", headers=_auth()).status_code == 200
 
 
 # --------------------------------------------------------------------------- #
@@ -105,7 +105,7 @@ def test_the_status_endpoint_needs_the_token_too(client):
 ])
 def test_file_names_outside_the_allowed_set_are_refused(client, name):
     with patch.object(intake, "start") as start:
-        r = client.post("/v1/intake/f1-report",
+        r = client.post("/v1/intake/tv-report",
                         json={"report_id": 1, "files": {name: {"text": "x"}}},
                         headers=_auth())
     assert r.status_code == 400
@@ -114,7 +114,7 @@ def test_file_names_outside_the_allowed_set_are_refused(client, name):
 
 def test_more_than_ten_files_is_refused(client):
     files = {f"f{i}.md": {"text": "x"} for i in range(11)}
-    r = client.post("/v1/intake/f1-report", json={"report_id": 1, "files": files},
+    r = client.post("/v1/intake/tv-report", json={"report_id": 1, "files": files},
                     headers=_auth())
     assert r.status_code == 400
 
@@ -122,7 +122,7 @@ def test_more_than_ten_files_is_refused(client):
 def test_more_than_8_mb_in_total_is_refused(client):
     big = base64.b64encode(b"\0" * (4 * 1024 * 1024 + 1)).decode()
     files = {"a.jpg": {"base64": big}, "b.jpg": {"base64": big}}
-    r = client.post("/v1/intake/f1-report", json={"report_id": 1, "files": files},
+    r = client.post("/v1/intake/tv-report", json={"report_id": 1, "files": files},
                     headers=_auth())
     assert r.status_code == 400
 
@@ -133,7 +133,7 @@ def test_more_than_8_mb_in_total_is_refused(client):
     {},
 ])
 def test_a_file_must_be_exactly_one_of_text_or_valid_base64(client, entry):
-    r = client.post("/v1/intake/f1-report",
+    r = client.post("/v1/intake/tv-report",
                     json={"report_id": 1, "files": {"a.md": entry}}, headers=_auth())
     assert r.status_code == 400
 
@@ -157,17 +157,17 @@ def test_a_valid_report_is_accepted_and_runs_as_a_job(client):
         intake.finish(job_id, "completed", result='{"verdict": "spam"}')
 
     with patch.object(intake, "run", new=fake_run):
-        r = client.post("/v1/intake/f1-report",
+        r = client.post("/v1/intake/tv-report",
                         json=_body(**{"report.json": {"text": "{}"}}), headers=_auth())
         assert r.status_code == 202
         job_id = r.json()["job_id"]
-        status = client.get(f"/v1/intake/f1-report/{job_id}", headers=_auth()).json()
+        status = client.get(f"/v1/intake/tv-report/{job_id}", headers=_auth()).json()
     assert status == {"status": "completed", "result": '{"verdict": "spam"}', "error": ""}
     assert seen["files"] == {"report.json": b"{}"}
 
 
 def test_an_unknown_job_is_404(client):
-    assert client.get("/v1/intake/f1-report/nope", headers=_auth()).status_code == 404
+    assert client.get("/v1/intake/tv-report/nope", headers=_auth()).status_code == 404
 
 
 def test_finished_records_are_kept_for_an_hour_and_then_dropped(client):
@@ -177,9 +177,9 @@ def test_finished_records_are_kept_for_an_hour_and_then_dropped(client):
                              "finished_epoch": time.time() - 60}
     intake.records["live"] = {"status": "running", "result": "", "error": "",
                               "finished_epoch": None}
-    assert client.get("/v1/intake/f1-report/old", headers=_auth()).status_code == 404
-    assert client.get("/v1/intake/f1-report/new", headers=_auth()).status_code == 200
-    assert client.get("/v1/intake/f1-report/live", headers=_auth()).status_code == 200
+    assert client.get("/v1/intake/tv-report/old", headers=_auth()).status_code == 404
+    assert client.get("/v1/intake/tv-report/new", headers=_auth()).status_code == 200
+    assert client.get("/v1/intake/tv-report/live", headers=_auth()).status_code == 200
 
 
 # --------------------------------------------------------------------------- #
@@ -468,3 +468,9 @@ def test_the_tv_report_path_queues_and_reports_a_job(client):
 def test_the_agent_is_named_tv_report_intake():
     assert intake.AGENT == "tv-report-intake"
     assert intake.DEFAULT_AGENT_FILE.endswith("/tv-report-intake.md")
+
+
+def test_the_old_f1_report_path_is_gone(client):
+    """The tv server reports to /v1/intake/tv-report since the 2026-11-01
+    cutover; the f1-report path it replaced no longer exists."""
+    assert client.post("/v1/intake/f1-report", json=_body(), headers=_auth()).status_code == 404

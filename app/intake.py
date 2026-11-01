@@ -1,8 +1,5 @@
 """The tv report intake: ``POST /v1/intake/tv-report``.
 
-The f1-stream app was renamed tv on 2026-11-01; ``/v1/intake/f1-report`` is
-served too until the tv server is live, then removed.
-
 the tv backend sends one User report here, with the evidence it gathered,
 and polls for a verdict (spam, duplicate, question, feedback or an issue draft).
 The run reads text a stranger typed, in a pod that also holds forge tokens, a
@@ -163,7 +160,6 @@ def start(files: dict[str, bytes]) -> str:
 
 
 @router.post("/v1/intake/tv-report", status_code=202)
-@router.post("/v1/intake/f1-report", status_code=202)
 async def submit(request: IntakeRequest, authorization: str | None = Header(default=None)):
     verify_token(authorization)
     _evict()
@@ -178,7 +174,6 @@ async def submit(request: IntakeRequest, authorization: str | None = Header(defa
 
 
 @router.get("/v1/intake/tv-report/{job_id}")
-@router.get("/v1/intake/f1-report/{job_id}")
 async def status(job_id: str, authorization: str | None = Header(default=None)):
     verify_token(authorization)
     _evict()
