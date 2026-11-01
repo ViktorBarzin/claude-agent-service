@@ -1,5 +1,5 @@
 ---
-name: f1-report-intake
+name: tv-report-intake
 description: The Intake for f1-stream User reports. Reads one report and the evidence the f1-stream backend gathered for it, checks it against docs/issue-bar.md, and returns one JSON verdict (spam, duplicate, question, feedback or issue). Reads files only; the backend does every write.
 model: sonnet
 tools: Read, Grep, Glob

@@ -1,4 +1,7 @@
-"""The f1-stream report intake: ``POST /v1/intake/f1-report``.
+"""The tv report intake: ``POST /v1/intake/tv-report``.
+
+The f1-stream app was renamed tv on 2026-11-01; ``/v1/intake/f1-report`` is
+served too until the tv server is live, then removed.
 
 f1-stream's backend sends one User report here, with the evidence it gathered,
 and polls for a verdict (spam, duplicate, question, feedback or an issue draft).
@@ -57,9 +60,9 @@ ENV_REPO_URL = "INTAKE_REPO_URL"
 #: read access to viktor/f1-stream.
 ENV_CLONE_TOKEN = "FIXER_FORGEJO_TOKEN"
 
-AGENT = "f1-report-intake"
+AGENT = "tv-report-intake"
 #: The Dockerfile stages the agent here, in an image layer nothing mounts over.
-DEFAULT_AGENT_FILE = "/usr/share/agent-seed/f1-report-intake.md"
+DEFAULT_AGENT_FILE = "/usr/share/agent-seed/tv-report-intake.md"
 DEFAULT_REPO_URL = "https://forgejo.viktorbarzin.me/viktor/f1-stream.git"
 #: The only tools the intake may have. A definition that differs is refused.
 TOOLS = ("Read", "Grep", "Glob")
@@ -159,6 +162,7 @@ def start(files: dict[str, bytes]) -> str:
     return job_id
 
 
+@router.post("/v1/intake/tv-report", status_code=202)
 @router.post("/v1/intake/f1-report", status_code=202)
 async def submit(request: IntakeRequest, authorization: str | None = Header(default=None)):
     verify_token(authorization)
@@ -173,6 +177,7 @@ async def submit(request: IntakeRequest, authorization: str | None = Header(defa
     return {"job_id": job_id}
 
 
+@router.get("/v1/intake/tv-report/{job_id}")
 @router.get("/v1/intake/f1-report/{job_id}")
 async def status(job_id: str, authorization: str | None = Header(default=None)):
     verify_token(authorization)

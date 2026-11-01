@@ -25,7 +25,7 @@ TOKEN = "intake-token"
 
 AGENT_MD = """\
 ---
-name: f1-report-intake
+name: tv-report-intake
 description: The Intake.
 model: sonnet
 tools: Read, Grep, Glob
@@ -41,7 +41,7 @@ Answer with JSON.
 def _fresh_state(monkeypatch, tmp_path):
     intake.records.clear()
     intake.semaphore = asyncio.Semaphore(1)
-    agent_file = tmp_path / "f1-report-intake.md"
+    agent_file = tmp_path / "tv-report-intake.md"
     agent_file.write_text(AGENT_MD)
     monkeypatch.setenv(intake.ENV_AGENT_FILE, str(agent_file))
     monkeypatch.setenv(intake.ENV_TOKEN, TOKEN)
@@ -202,7 +202,7 @@ def test_the_agent_file_is_parsed_into_an_inline_definition():
 def test_argv_is_locked_down():
     argv = intake.argv(_agent(), model=None)
     assert argv[:2] == ["claude", "-p"]
-    assert argv[argv.index("--agent") + 1] == "f1-report-intake"
+    assert argv[argv.index("--agent") + 1] == "tv-report-intake"
     assert argv[argv.index("--tools") + 1] == "Read,Grep,Glob"
     assert "--strict-mcp-config" in argv
     assert "--disable-slash-commands" in argv
@@ -226,7 +226,7 @@ def test_argv_loads_no_settings_files_and_defines_the_agent_inline():
     argv = intake.argv(_agent(), model=None)
     assert argv[argv.index("--setting-sources") + 1] == ""
     defined = json.loads(argv[argv.index("--agents") + 1])
-    assert defined["f1-report-intake"]["tools"] == ["Read", "Grep", "Glob"]
+    assert defined["tv-report-intake"]["tools"] == ["Read", "Grep", "Glob"]
 
 
 def test_argv_takes_the_prompt_on_stdin_not_argv():
@@ -435,14 +435,36 @@ def test_the_dockerfile_seeds_the_agent():
     here = os.path.dirname(__file__)
     with open(os.path.join(here, "..", "Dockerfile")) as fh:
         dockerfile = fh.read()
-    assert ("COPY agents/f1-report-intake.md /usr/share/agent-seed/f1-report-intake.md"
+    assert ("COPY agents/tv-report-intake.md /usr/share/agent-seed/tv-report-intake.md"
             in dockerfile)
-    assert intake.DEFAULT_AGENT_FILE == "/usr/share/agent-seed/f1-report-intake.md"
+    assert intake.DEFAULT_AGENT_FILE == "/usr/share/agent-seed/tv-report-intake.md"
 
 
 def test_the_shipped_agent_file_has_exactly_the_reading_tools():
     here = os.path.dirname(__file__)
-    with open(os.path.join(here, "..", "agents", "f1-report-intake.md")) as fh:
+    with open(os.path.join(here, "..", "agents", "tv-report-intake.md")) as fh:
         agent = intake.parse_agent(fh.read())
     assert agent["tools"] == ["Read", "Grep", "Glob"]
     intake.argv(agent, model=None)  # does not raise
+
+
+# --------------------------------------------------------------------------- #
+# The tv path (the f1-stream app was renamed tv on 2026-11-01).
+# --------------------------------------------------------------------------- #
+def test_the_tv_report_path_queues_and_reports_a_job(client):
+    """The tv server sends reports to /v1/intake/tv-report. The f1-report path
+    stays until the tv server is live, then goes."""
+    async def fake_run(job_id, files):
+        intake.finish(job_id, "completed", result="{}")
+
+    with patch.object(intake, "run", new=fake_run):
+        r = client.post("/v1/intake/tv-report", json=_body(), headers=_auth())
+        assert r.status_code == 202
+        job_id = r.json()["job_id"]
+        status = client.get(f"/v1/intake/tv-report/{job_id}", headers=_auth())
+    assert status.status_code == 200
+
+
+def test_the_agent_is_named_tv_report_intake():
+    assert intake.AGENT == "tv-report-intake"
+    assert intake.DEFAULT_AGENT_FILE.endswith("/tv-report-intake.md")

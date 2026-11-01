@@ -128,8 +128,8 @@ and whether a reply comment starts a run. `infra` keeps the values above.
 _Avoid_: "repo config" (the environment config is global; a profile is per repo).
 
 **Intake**:
-The f1-stream report intake (`POST /v1/intake/f1-report`, `app/intake.py`):
-one run of the `f1-report-intake` agent over a User report in a fresh f1-stream
+The tv report intake (`POST /v1/intake/tv-report`; `/v1/intake/f1-report` until the tv server is live; `app/intake.py`):
+one run of the `tv-report-intake` agent over a User report in a fresh f1-stream
 clone, with reading tools only, no settings files and a stripped environment.
 It returns a verdict; the f1-stream backend does every write. Not a fixer run.
 _Avoid_: "triage" (Viktor's approval is the triage).
