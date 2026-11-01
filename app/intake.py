@@ -3,7 +3,7 @@
 The f1-stream app was renamed tv on 2026-11-01; ``/v1/intake/f1-report`` is
 served too until the tv server is live, then removed.
 
-f1-stream's backend sends one User report here, with the evidence it gathered,
+the tv backend sends one User report here, with the evidence it gathered,
 and polls for a verdict (spam, duplicate, question, feedback or an issue draft).
 The run reads text a stranger typed, in a pod that also holds forge tokens, a
 Vault token and a service account, so this endpoint runs exactly one agent and
@@ -11,7 +11,7 @@ starts it in a locked-down way:
 
 - its own token (``INTAKE_API_TOKEN``), so the backend never holds the global
   ``/execute`` token; unset, the endpoint answers 503 to everything;
-- a fresh shallow clone of f1-stream master, made by this code before the run
+- a fresh shallow clone of tv master, made by this code before the run
   with the token in a request header, so neither argv nor ``.git/config`` holds
   it;
 - ``--tools Read,Grep,Glob``, no MCP servers, no slash commands, no
@@ -57,13 +57,13 @@ ENV_AGENT_FILE = "INTAKE_AGENT_FILE"
 ENV_MODEL = "INTAKE_MODEL"
 ENV_REPO_URL = "INTAKE_REPO_URL"
 #: The infra-agent bot's token, which the service already clones with. It needs
-#: read access to viktor/f1-stream.
+#: read access to viktor/tv.
 ENV_CLONE_TOKEN = "FIXER_FORGEJO_TOKEN"
 
 AGENT = "tv-report-intake"
 #: The Dockerfile stages the agent here, in an image layer nothing mounts over.
 DEFAULT_AGENT_FILE = "/usr/share/agent-seed/tv-report-intake.md"
-DEFAULT_REPO_URL = "https://forgejo.viktorbarzin.me/viktor/f1-stream.git"
+DEFAULT_REPO_URL = "https://forgejo.viktorbarzin.me/viktor/tv.git"
 #: The only tools the intake may have. A definition that differs is refused.
 TOOLS = ("Read", "Grep", "Glob")
 
@@ -254,8 +254,8 @@ def write_files(workspace: str, files: dict[str, bytes]) -> None:
 
 
 _PROMPT = """\
-A User report for f1-stream is in report/ in your working directory, which is a
-checkout of the f1-stream repo. The files:
+A User report for tv is in report/ in your working directory, which is a
+checkout of the tv repo. The files:
 
 {files}
 
@@ -304,7 +304,7 @@ async def _communicate(proc, data: bytes | None, timeout: float | None) -> bytes
 
 
 async def clone(dest: str) -> None:
-    """Shallow-clone f1-stream master into ``dest``.
+    """Shallow-clone tv master into ``dest``.
 
     The token goes in as an ``http.extraHeader`` through git's environment
     config, so it is on no command line and the clone's remote URL stays clean.
@@ -331,7 +331,7 @@ async def clone(dest: str) -> None:
 
 async def _run_in_workspace(workspace: str, files: dict[str, bytes]) -> tuple[str, str | None]:
     """Clone, write the report, run the agent. Returns (result text, error)."""
-    repo = os.path.join(workspace, "f1-stream")
+    repo = os.path.join(workspace, "tv")
     await clone(repo)
     write_files(repo, files)
     cmd = argv(load_agent(), os.environ.get(ENV_MODEL) or None)

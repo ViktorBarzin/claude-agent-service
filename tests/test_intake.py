@@ -1,4 +1,4 @@
-"""The f1-stream report intake: ``POST /v1/intake/f1-report``.
+"""The tv report intake: ``POST /v1/intake/tv-report``.
 
 The intake reads text a stranger typed, in a pod that holds forge tokens, a
 Vault token and a service account. What stands between that text and those

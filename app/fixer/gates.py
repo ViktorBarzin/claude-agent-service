@@ -28,7 +28,7 @@ The gates, first match wins (design doc "Trigger and authorization"):
   6. **Repo enrolment** — the repo must be in ``config.allowlist``. An empty
      allowlist admits nothing, which is the shipped default.
 
-**The comment trigger** (f1-stream only, ``comment_trigger=True``): a comment
+**The comment trigger** (tv only, ``comment_trigger=True``): a comment
 ``created`` on an open issue that carries the trigger label and no
 ``agent-in-progress``, whose body does not start with ``To reporter:`` (those
 are relayed to the reporter, not addressed to the fixer). It then passes the
@@ -63,7 +63,7 @@ TRIGGERING_EVENTS = frozenset({EVENT_ISSUES, EVENT_ISSUE_LABEL})
 EVENT_ISSUE_COMMENT = "issue_comment"
 ACTION_CREATED = "created"
 #: A comment starting with this is a message for the reporter, relayed by the
-#: f1-stream backend, never an instruction to the fixer.
+#: tv backend, never an instruction to the fixer.
 RELAY_PREFIX = "To reporter:"
 
 

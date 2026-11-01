@@ -20,7 +20,7 @@ finds the issue still labelled ``broken`` and starts it when the lock frees.
 
 What counts as a trigger, who may pull it, which agent runs and with which
 prompt are per repo (:mod:`app.fixer.profiles`). On a repo with the comment
-trigger (f1-stream), a reply from the approver on an approved issue starts a
+trigger (tv), a reply from the approver on an approved issue starts a
 continue turn carrying the reply. When the repo is busy, the reply takes
 ``needs-human`` off instead, which is what puts the issue back in the drain's
 queue for when the lock frees.

@@ -607,7 +607,7 @@ def _submit_fixer_job(prompt: str, issue: str = "", agent: str | None = None) ->
 
     ``issue`` names the run's log file, so a transcript is findable by the issue
     it was for rather than only by an opaque job id. ``agent`` overrides the
-    configured one for a repo whose profile names its own (f1-stream).
+    configured one for a repo whose profile names its own (tv).
     """
     cfg = fixer_config.from_env()
     return start_job(ExecuteRequest(

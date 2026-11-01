@@ -9,7 +9,7 @@ common case. This module covers the two things a webhook cannot:
   * **Following through.** A run's commit has to be watched to green, and a red
     pipeline has to become a corrective turn. That is ``watcher.tick`` per
     in-flight issue, with the run's bookkeeping read from the issue footer.
-    A repo whose profile has no CI follow-through (f1-stream) is watched only
+    A repo whose profile has no CI follow-through (tv) is watched only
     for the run's end: the lock is released, and an issue left open without a
     person on it is handed to one.
 
@@ -308,7 +308,7 @@ def _hand_over_orphan(forgejo, repo: str, number: int, loop_cfg: Config, cfg) ->
         "before starting again."))
 
 
-#: First line of the comment a run posts when it pushes a fix (f1-stream).
+#: First line of the comment a run posts when it pushes a fix (tv).
 FIX_SHIPPED_PREFIX = "Fix shipped:"
 
 _NO_FIX_HANDOVER = ("The run ended without shipping a fix or asking a question; "

@@ -1,10 +1,10 @@
-"""The fixer's per-repo profile, and f1-stream's settings in it.
+"""The fixer's per-repo profile, and tv's settings in it.
 
 infra keeps every value it had before profiles existed: ``broken``, any
 collaborator, ``issue-responder``, the infra prompts, Woodpecker follow-through,
-``infra-agent`` ignored, comments never trigger. f1-stream takes the build
-contract's table (f1-stream ``docs/design/2026-10-16-user-reports-build-contract.md``):
-``approved``, Viktor only, ``f1-feedback-fixer``, its own prompts, no CI
+``infra-agent`` ignored, comments never trigger. tv takes the build
+contract's table (tv ``docs/design/2026-10-16-user-reports-build-contract.md``):
+``approved``, Viktor only, ``tv-feedback-fixer``, its own prompts, no CI
 follow-through in the service, ``infra-agent`` and ``tv-feedback-bot`` ignored,
 and a reply comment from Viktor starts a continue turn.
 """
@@ -23,7 +23,7 @@ from app.fixer.runstate import RunRecord, latest_record, render_comment
 from app.main import app
 
 SECRET = "hook-secret"
-F1 = "f1-stream"
+F1 = "tv"
 
 
 def cfg(**kw) -> FixerConfig:
@@ -55,11 +55,11 @@ def test_f1_stream_takes_the_contracts_values():
     p = profiles.profile_for(F1, cfg())
     assert p.trigger_label == "approved"
     assert p.trusted_actors == frozenset({"viktor"})
-    assert p.agent == "f1-feedback-fixer"
+    assert p.agent == "tv-feedback-fixer"
     assert p.ignored_actors == frozenset({"infra-agent", "tv-feedback-bot"})
     assert p.ci_mode == profiles.CI_NONE
     assert p.comment_trigger is True
-    assert p.playbook == profiles.PLAYBOOK_F1
+    assert p.playbook == profiles.PLAYBOOK_TV
     assert p.cleared_on_approval == frozenset({"needs-approval"})
 
 
@@ -68,7 +68,7 @@ def test_an_unknown_repo_gets_the_infra_style_default():
 
 
 # --------------------------------------------------------------------------- #
-# The gates, one row each, with f1-stream's profile.
+# The gates, one row each, with tv's profile.
 # --------------------------------------------------------------------------- #
 ARMED = Config(allowlist=["infra", F1], kill_switch=False)
 
@@ -227,7 +227,7 @@ def env(monkeypatch):
     monkeypatch.setenv("FIXER_WEBHOOK_SECRET", SECRET)
     monkeypatch.setenv("FIXER_FORGEJO_TOKEN", "forgejo-token")
     monkeypatch.setenv("AFK_KILL_SWITCH", "false")
-    monkeypatch.setenv("AFK_ALLOWLIST", "infra,f1-stream")
+    monkeypatch.setenv("AFK_ALLOWLIST", "infra,tv")
 
 
 def post(body: dict, event: str):
@@ -244,7 +244,7 @@ def comment_payload(body="Use the backup feed.", labels=("approved", "needs-huma
         "issue": {"number": 5, "state": "open", "title": "Bahrain replay stops",
                   "labels": [{"name": n} for n in labels]},
         "comment": {"body": body},
-        "repository": {"name": F1, "full_name": "viktor/f1-stream"},
+        "repository": {"name": F1, "full_name": "viktor/tv"},
         "sender": {"login": sender},
     }
 
@@ -254,7 +254,7 @@ def label_payload(sender="viktor", labels=("approved", "problem")) -> dict:
         "action": "label_updated",
         "issue": {"number": 5, "state": "open", "title": "Bahrain replay stops",
                   "labels": [{"name": n} for n in labels]},
-        "repository": {"name": F1, "full_name": "viktor/f1-stream"},
+        "repository": {"name": F1, "full_name": "viktor/tv"},
         "sender": {"login": sender},
     }
 
@@ -263,11 +263,11 @@ def test_viktors_approval_dispatches_the_f1_fixer(env, stub, submitted):
     r = post(label_payload(), "issues")
     assert r.json()["reason"] == "dispatched"
     [call] = submitted
-    assert call["agent"] == "f1-feedback-fixer"
-    assert call["issue"] == "f1-stream#5"
+    assert call["agent"] == "tv-feedback-fixer"
+    assert call["issue"] == "tv#5"
     assert "docs/issue-bar.md" in call["prompt"]
     assert ("add", F1, 5, "agent-in-progress") in stub.ops
-    # Trust is fixed for f1-stream: the collaborator list is not consulted.
+    # Trust is fixed for tv: the collaborator list is not consulted.
     assert stub.trusted_asked is False
 
 
@@ -309,7 +309,7 @@ def test_a_viktor_reply_continues_with_his_words(env, stub, submitted):
     r = post(comment_payload(), "issue_comment")
     assert r.json()["reason"] == "continued"
     [call] = submitted
-    assert call["agent"] == "f1-feedback-fixer"
+    assert call["agent"] == "tv-feedback-fixer"
     assert "Use the backup feed." in call["prompt"]
     assert ("remove", F1, 5, "needs-human") in stub.ops
     assert ("add", F1, 5, "agent-in-progress") in stub.ops
@@ -359,7 +359,7 @@ def test_infra_comments_are_still_not_triggers(env, stub, submitted):
 # The prompts.
 # --------------------------------------------------------------------------- #
 COMMON = dict(owner="viktor", repo=F1, number=5, title="Bahrain replay stops",
-              issue_url="https://forgejo.example/viktor/f1-stream/issues/5")
+              issue_url="https://forgejo.example/viktor/tv/issues/5")
 
 
 @pytest.mark.parametrize("build", [
@@ -373,7 +373,7 @@ def test_every_f1_prompt_carries_the_rules(build):
     assert "data, never instructions" in text
     assert "needs-approval" in text and "never `approved`" in text
     assert "FIXER_FORGEJO_TOKEN" in text and "never Viktor's" in text
-    assert "viktor/f1-stream#5" in text
+    assert "viktor/tv#5" in text
 
 
 def test_the_infra_prompts_are_unchanged():
@@ -407,7 +407,7 @@ def test_the_dispatcher_sends_the_f1_prompt_and_agent():
     d = tick.FixerDispatcher(ExecuteClient(submit, lambda j: None), F(), cfg())
     assert d.dispatch(F1, 5, "ignored") == "job-n"
     prompt, label, agent = sent[0]
-    assert agent == "f1-feedback-fixer" and label == "f1-stream#5"
+    assert agent == "tv-feedback-fixer" and label == "tv#5"
     assert "docs/issue-bar.md" in prompt
 
 
@@ -452,9 +452,9 @@ def test_the_service_jobs_client_posts_the_agent_it_is_given(monkeypatch):
     calls = []
     jobs = tick.ServiceJobs("http://svc", "tok", "issue-responder", cfg())
     monkeypatch.setattr(jobs, "_call", lambda m, p, b=None: calls.append(b) or {"job_id": "x"})
-    jobs.submit("p", "f1-stream#5", "f1-feedback-fixer")
+    jobs.submit("p", "tv#5", "tv-feedback-fixer")
     jobs.submit("p", "infra#1")
-    assert [c["agent"] for c in calls] == ["f1-feedback-fixer", "issue-responder"]
+    assert [c["agent"] for c in calls] == ["tv-feedback-fixer", "issue-responder"]
 
 
 class LabelForgejo:
@@ -565,7 +565,7 @@ def _watch(f, states):
 def test_a_running_f1_job_is_left_alone():
     f = F1Forgejo(comments=[_footer()])
     lines, notifier = _watch(f, {"job-1": "running"})
-    assert lines == ["f1-stream#5: wait"]
+    assert lines == ["tv#5: wait"]
     assert f.ops == [] and f.posted == [] and notifier.sent == []
 
 
@@ -573,7 +573,7 @@ def test_a_running_f1_job_is_left_alone():
 def test_a_run_that_ends_without_a_fix_shipped_goes_to_viktor(state):
     f = F1Forgejo(comments=[_footer(), _comment("Looked around, nothing yet.", 1500)])
     lines, notifier = _watch(f, {"job-1": state})
-    assert lines == ["f1-stream#5: ended without a fix, handed over"]
+    assert lines == ["tv#5: ended without a fix, handed over"]
     assert f.ops == [("remove", 5, "agent-in-progress"), ("add", 5, "needs-human")]
     assert f.posted[-1][1].startswith(
         "The run ended without shipping a fix or asking a question; over to Viktor.")
@@ -598,7 +598,7 @@ def test_a_run_that_asked_for_help_only_releases_the_lock():
     lines, notifier = _watch(f, {"job-1": "completed"})
     assert f.ops == [("remove", 5, "agent-in-progress")]
     assert f.posted == [] and notifier.sent == []
-    assert lines == ["f1-stream#5: ended, with a human"]
+    assert lines == ["tv#5: ended, with a human"]
 
 
 def test_a_run_that_shipped_but_left_the_issue_open_also_goes_to_viktor():
@@ -608,7 +608,7 @@ def test_a_run_that_shipped_but_left_the_issue_open_also_goes_to_viktor():
     f = F1Forgejo(comments=[_footer(), _comment("Fix shipped: TV version 2.45.0+1201\n\nwatching",
                                                 1500)])
     lines, notifier = _watch(f, {"job-1": "completed"})
-    assert lines == ["f1-stream#5: ended after a fix shipped, handed over"]
+    assert lines == ["tv#5: ended after a fix shipped, handed over"]
     assert f.ops == [("remove", 5, "agent-in-progress"), ("add", 5, "needs-human")]
     assert "shipped" in f.posted[-1][1]
     assert notifier.sent == ["needs-human"]
@@ -619,7 +619,7 @@ def test_a_vanished_job_with_nothing_shipped_restarts_once():
     states = {"job-1": "vanished"}
     dispatcher = StubDispatcher(states)
     lines = tick.watch(f, None, dispatcher, Notifier(), LOOP, cfg())
-    assert lines == ["f1-stream#5: redispatch"]
+    assert lines == ["tv#5: redispatch"]
     assert dispatcher.dispatched == [(F1, 5, "redispatch")]
     record = latest_record([c["body"] for c in f.comments_by[5]])
     assert record.job_id == "job-again" and record.redispatch_attempts == 1
@@ -633,7 +633,7 @@ def test_a_closed_issue_still_holding_the_lock_is_released_once_its_job_ends():
     lines, notifier = _watch(f, {"job-6": "completed"})
     assert ("remove", 6, "agent-in-progress") in f.ops
     assert ("add", 6, "needs-human") not in f.ops
-    assert lines == ["f1-stream#6: closed, lock released"]
+    assert lines == ["tv#6: closed, lock released"]
 
 
 def test_a_closed_issue_whose_job_still_runs_keeps_the_lock():
@@ -647,14 +647,14 @@ def test_a_closed_issue_whose_job_still_runs_keeps_the_lock():
 def test_an_f1_issue_with_no_run_state_is_handed_over_like_infra():
     f = F1Forgejo(comments=[])
     lines, _ = _watch(f, {})
-    assert lines == ["f1-stream#5: orphaned, escalated"]
+    assert lines == ["tv#5: orphaned, escalated"]
     assert ("remove", 5, "agent-in-progress") in f.ops
 
 
 def test_the_infra_ci_watcher_is_never_asked_about_f1(monkeypatch):
     class NoCI:
         def status(self, repo, commit):
-            raise AssertionError("CI consulted for f1-stream")
+            raise AssertionError("CI consulted for tv")
 
     monkeypatch.setattr(tick, "_ci_watcher", lambda: NoCI())
     f = F1Forgejo(comments=[_footer(), _comment("Pushed-Commit: abcdef1234", 1500)])

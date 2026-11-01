@@ -11,12 +11,12 @@ may trigger, the configured agent (``issue-responder``), the infra prompts,
 Woodpecker follow-through, the configured bot ignored, and comments never
 trigger.
 
-``f1-stream`` follows the user-reports build contract
-(f1-stream ``docs/design/2026-10-16-user-reports-build-contract.md``):
+``tv`` follows the user-reports build contract
+(tv ``docs/design/2026-10-16-user-reports-build-contract.md``):
 
 - ``approved`` dispatches, and only when Viktor applied it; his approval takes
   ``needs-approval`` off, whether the run starts now or waits for the drain;
-- ``f1-feedback-fixer`` runs with the f1-stream prompts;
+- ``tv-feedback-fixer`` runs with the tv prompts;
 - the service does not follow CI: the agent watches the build and deploy itself,
   and the service only notices when the run ends;
 - both bots (the fixer's own ``infra-agent`` and the backend's
@@ -37,14 +37,14 @@ CI_WOODPECKER = "woodpecker"
 CI_NONE = "none"
 
 PLAYBOOK_INFRA = "infra"
-PLAYBOOK_F1 = "f1-stream"
+PLAYBOOK_TV = "tv"
 
-F1_STREAM = "f1-stream"
-F1_TRIGGER_LABEL = "approved"
-F1_APPROVER = "viktor"
-F1_AGENT = "f1-feedback-fixer"
-F1_FEEDBACK_BOT = "tv-feedback-bot"
-F1_NEEDS_APPROVAL = "needs-approval"
+TV_REPO = "tv"
+TV_TRIGGER_LABEL = "approved"
+TV_APPROVER = "viktor"
+TV_AGENT = "tv-feedback-fixer"
+TV_FEEDBACK_BOT = "tv-feedback-bot"
+TV_NEEDS_APPROVAL = "needs-approval"
 
 
 @dataclass(frozen=True)
@@ -69,16 +69,16 @@ class RepoProfile:
 
 def profile_for(repo: str, cfg: FixerConfig) -> RepoProfile:
     """The settings for ``repo``. Repos without an entry get infra's."""
-    if repo == F1_STREAM:
+    if repo == TV_REPO:
         return RepoProfile(
-            trigger_label=F1_TRIGGER_LABEL,
-            trusted_actors=frozenset({F1_APPROVER}),
-            agent=F1_AGENT,
-            ignored_actors=frozenset({cfg.bot_actor, F1_FEEDBACK_BOT}),
+            trigger_label=TV_TRIGGER_LABEL,
+            trusted_actors=frozenset({TV_APPROVER}),
+            agent=TV_AGENT,
+            ignored_actors=frozenset({cfg.bot_actor, TV_FEEDBACK_BOT}),
             ci_mode=CI_NONE,
             comment_trigger=True,
-            playbook=PLAYBOOK_F1,
-            cleared_on_approval=frozenset({F1_NEEDS_APPROVAL}),
+            playbook=PLAYBOOK_TV,
+            cleared_on_approval=frozenset({TV_NEEDS_APPROVAL}),
         )
     return RepoProfile(
         trigger_label=cfg.trigger_label,
@@ -104,16 +104,16 @@ def clear_on_approval(client, profile: RepoProfile, repo: str, number: int,
 def first_turn(profile: RepoProfile, *, owner: str, repo: str, number: int, title: str,
                issue_url: str) -> str:
     common = dict(owner=owner, repo=repo, number=number, title=title, issue_url=issue_url)
-    if profile.playbook == PLAYBOOK_F1:
-        return prompts.f1_first_turn(**common)
+    if profile.playbook == PLAYBOOK_TV:
+        return prompts.tv_first_turn(**common)
     return prompts.first_turn(**common, trigger_label=profile.trigger_label)
 
 
 def redispatch_turn(profile: RepoProfile, *, owner: str, repo: str, number: int,
                     title: str, issue_url: str) -> str:
     common = dict(owner=owner, repo=repo, number=number, title=title, issue_url=issue_url)
-    if profile.playbook == PLAYBOOK_F1:
-        return prompts.f1_redispatch_turn(**common)
+    if profile.playbook == PLAYBOOK_TV:
+        return prompts.tv_redispatch_turn(**common)
     return prompts.redispatch_turn(**common)
 
 
@@ -131,7 +131,7 @@ def continue_turn(profile: RepoProfile, *, owner: str, repo: str, number: int, t
     """The turn a trusted reply comment starts. Only comment-triggered repos have one."""
     if not profile.comment_trigger:
         raise ValueError(f"{repo} is not triggered by comments")
-    return prompts.f1_continue_turn(owner=owner, repo=repo, number=number, title=title,
+    return prompts.tv_continue_turn(owner=owner, repo=repo, number=number, title=title,
                                     issue_url=issue_url, reply=reply)
 
 
