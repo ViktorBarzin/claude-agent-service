@@ -134,6 +134,14 @@ clone, with reading tools only, no settings files and a stripped environment.
 It returns a verdict; the f1-stream backend does every write. Not a fixer run.
 _Avoid_: "triage" (Viktor's approval is the triage).
 
+**Reels trending**:
+The Reels app's weekly song lookup (`POST /v1/reels/trending-songs`,
+`app/reels_trending.py`): one run of the `reels-trending` agent with web search
+only, on its own token (`REELS_TRENDING_TOKEN`), no settings files and a
+stripped environment, the same lock-down as the Intake. It returns the songs
+trending on Instagram Reels and TikTok this week; the answer is cached per date.
+_Avoid_: "chart" (no official one exists).
+
 ## Relationships
 
 - The **Breakglass** UI is served by an in-cluster pod and reaches the

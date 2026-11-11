@@ -116,6 +116,7 @@ COPY agents/nextcloud-todos-exec.md /usr/share/agent-seed/nextcloud-todos-exec.m
 # agent on the command line, so the run loads no settings file that could widen
 # its tools; it does not need to be copied into ~/.claude/agents.
 COPY agents/tv-report-intake.md /usr/share/agent-seed/tv-report-intake.md
+COPY agents/reels-trending.md /usr/share/agent-seed/reels-trending.md
 # The breakglass deployment (separate stack) seeds this one instead of the
 # untrusted-input agents; its init container copies whichever it needs.
 COPY agents/breakglass.md /usr/share/agent-seed/breakglass.md
