@@ -172,3 +172,16 @@ def test_the_prompt_names_the_date_and_only_the_date():
     p = reels_trending.prompt("2026-11-11")
     assert "2026-11-11" in p
     assert "{" not in p.split("2026-11-11")[0][-5:]
+
+
+def test_parse_songs_reads_json_from_the_text_when_structured_output_is_missing():
+    """With --agent, the CLI may not apply --json-schema; the agent then answers in text."""
+    text = "Here are the songs:\n```json\n" + json.dumps({"songs": SONGS}) + "\n```\nDone."
+    out = json.dumps({"type": "result", "is_error": False, "result": text, "structured_output": None})
+    assert reels_trending.parse_songs(out) == SONGS
+
+
+def test_parse_songs_refuses_prose_without_json():
+    out = json.dumps({"type": "result", "is_error": False, "result": "1. Tate McRae - Housewife", "structured_output": None})
+    with pytest.raises(RuntimeError):
+        reels_trending.parse_songs(out)

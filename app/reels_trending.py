@@ -128,7 +128,9 @@ def scrubbed_env(environ) -> dict[str, str]:
 
 _PROMPT = """\
 Today is {today}. Find the songs trending right now as audio on Instagram Reels
-and TikTok, following your instructions, and answer with the structured output.
+and TikTok, following your instructions. Your final message must be ONLY one JSON
+object, {{"songs": [{{"title", "artist", "why", "source"}}, ...]}}: no prose, no
+code fence.
 """
 
 
@@ -144,7 +146,8 @@ def parse_songs(stdout: str) -> list[dict]:
         raise RuntimeError("unreadable output from the CLI") from None
     if not isinstance(event, dict) or event.get("is_error"):
         raise RuntimeError(str(event.get("result") if isinstance(event, dict) else "") or "agent error")
-    raw = (event.get("structured_output") or {}).get("songs") or []
+    structured = event.get("structured_output") or _json_in_text(str(event.get("result") or ""))
+    raw = (structured or {}).get("songs") or []
     songs = [
         {k: str(s.get(k) or "") for k in ("title", "artist", "why", "source")}
         for s in raw if isinstance(s, dict) and s.get("title") and s.get("artist")
@@ -152,6 +155,19 @@ def parse_songs(stdout: str) -> list[dict]:
     if len(songs) < MIN_SONGS:
         raise RuntimeError(f"only {len(songs)} songs found")
     return songs
+
+
+def _json_in_text(text: str) -> dict | None:
+    """The outermost {...} in the agent's text answer, if it parses. With --agent,
+    the CLI does not always apply --json-schema, and the answer arrives as text."""
+    start, end = text.find("{"), text.rfind("}")
+    if start < 0 or end <= start:
+        return None
+    try:
+        value = json.loads(text[start:end + 1])
+    except json.JSONDecodeError:
+        return None
+    return value if isinstance(value, dict) else None
 
 
 async def run_agent(today: str) -> list[dict]:
