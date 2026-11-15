@@ -167,19 +167,38 @@ class ForgejoClient:
                    {"assignees": [assignee]})
 
     def trusted_actors(self, repo: str) -> frozenset[str]:
-        """Who may trigger on this repo: its collaborators plus its owner.
+        """Who may trigger on this repo: collaborators who can write, plus its owner.
+
+        A read-only collaborator is not trusted: a fixer run on infra holds
+        Viktor's rights, so starting one must take the right to change the repo
+        anyway (enforced-identity plan, 2026-11-15). Forgejo's collaborator list
+        carries ``permissions: null``, so each collaborator's permission is read
+        separately; a failed read counts as read-only, so the answer fails closed.
 
         Cached per process. The set changes rarely and a stale answer fails in the
         safe direction — a newly-added collaborator is refused until the next
-        pod, rather than a removed one being admitted.
+        pod, rather than a removed one being admitted. A collaborator demoted to
+        read stays trusted until the next pod.
         """
         if repo not in self._trusted:
             raw = self._call("GET", f"/repos/{self._slug(repo)}/collaborators") or []
-            logins = {str(c.get("login")) for c in raw if c.get("login")}
+            logins = {
+                login for login in (str(c.get("login") or "") for c in raw)
+                if login and self._can_write(repo, login)
+            }
             self._trusted[repo] = frozenset(logins | {self._owner})
         return self._trusted[repo]
 
     # ---------------------------------------------------------- helpers #
+    def _can_write(self, repo: str, login: str) -> bool:
+        """Whether ``login`` holds write or admin on ``repo``."""
+        path = f"/repos/{self._slug(repo)}/collaborators/{urllib.parse.quote(login)}/permission"
+        try:
+            answer = self._call("GET", path) or {}
+        except RuntimeError:
+            return False
+        return str(answer.get("permission") or "") in ("write", "admin", "owner")
+
     def _association(self, actor: str, trusted: frozenset[str]) -> str:
         if actor and actor == self._owner:
             return _ASSOCIATION_OWNER

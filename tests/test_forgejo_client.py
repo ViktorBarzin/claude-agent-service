@@ -93,6 +93,7 @@ def test_label_events_maps_the_timeline_to_the_ports_shape():
              "user": {"login": "ebarzin"}},
         ]),
         "GET /repos/viktor/infra/collaborators": (200, [{"login": "ebarzin"}]),
+        "GET /repos/viktor/infra/collaborators/ebarzin/permission": (200, {"permission": "write"}),
     })
     assert c.label_events("infra", 5) == [{
         "event": "labeled",
@@ -221,20 +222,43 @@ def test_assign_puts_the_assignee():
     assert t.body_for("PATCH", "/repos/viktor/infra/issues/5") == {"assignees": ["viktor"]}
 
 
-def test_trusted_actors_is_collaborators_plus_the_owner():
+def test_trusted_actors_is_writing_collaborators_plus_the_owner():
     c, _ = make_client({
         "GET /repos/viktor/infra/collaborators": (200, [
-            {"login": "ebarzin"}, {"login": "infra-agent"},
+            {"login": "infra-agent"}, {"login": "boss"},
         ]),
+        "GET /repos/viktor/infra/collaborators/infra-agent/permission": (200, {"permission": "write"}),
+        "GET /repos/viktor/infra/collaborators/boss/permission": (200, {"permission": "admin"}),
     })
-    assert c.trusted_actors("infra") == frozenset({"viktor", "ebarzin", "infra-agent"})
+    assert c.trusted_actors("infra") == frozenset({"viktor", "infra-agent", "boss"})
+
+
+def test_a_read_only_collaborator_is_not_trusted():
+    # A fixer run on infra holds Viktor's rights, so labelling an issue there
+    # must take the right to change the repo. ebarzin reads viktor/infra and
+    # sends pull requests from a fork since 2026-11-15. Forgejo's collaborator
+    # list carries permissions: null, so each one is asked for separately; a
+    # failed lookup counts as read-only.
+    c, _ = make_client({
+        "GET /repos/viktor/infra/collaborators": (200, [
+            {"login": "ebarzin"}, {"login": "gone"},
+        ]),
+        "GET /repos/viktor/infra/collaborators/ebarzin/permission": (200, {"permission": "read"}),
+        "GET /repos/viktor/infra/collaborators/gone/permission": (404, {"message": "not found"}),
+    })
+    assert c.trusted_actors("infra") == frozenset({"viktor"})
 
 
 def test_trusted_actors_is_cached():
-    c, t = make_client({"GET /repos/viktor/infra/collaborators": (200, [{"login": "ebarzin"}])})
+    c, t = make_client({
+        "GET /repos/viktor/infra/collaborators": (200, [{"login": "ebarzin"}]),
+        "GET /repos/viktor/infra/collaborators/ebarzin/permission": (200, {"permission": "write"}),
+    })
     c.trusted_actors("infra")
     c.trusted_actors("infra")
-    assert t.count("GET", "/repos/viktor/infra/collaborators") == 1
+    # One list and one permission read, the second call served from cache.
+    assert t.count("GET", "/repos/viktor/infra/collaborators") == 2
+    assert t.count("GET", "/repos/viktor/infra/collaborators/ebarzin/permission") == 1
 
 
 # --------------------------------------------------------------------------- #
