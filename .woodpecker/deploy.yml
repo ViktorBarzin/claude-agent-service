@@ -18,3 +18,8 @@ steps:
     commands:
       - "kubectl -n claude-agent set image deployment/claude-agent-service claude-agent-service=${IMAGE_NAME}:${IMAGE_TAG} git-init=${IMAGE_NAME}:${IMAGE_TAG} seed-beads-agent=${IMAGE_NAME}:${IMAGE_TAG}"
       - "kubectl -n claude-agent rollout status deployment/claude-agent-service --timeout=300s"
+      # claude-agent-restricted (infra stacks/claude-agent-service/restricted.tf)
+      # runs the same image with no infra rights, for callers that read
+      # untrusted input.
+      - "kubectl -n claude-agent set image deployment/claude-agent-restricted claude-agent-service=${IMAGE_NAME}:${IMAGE_TAG} git-init=${IMAGE_NAME}:${IMAGE_TAG} seed-agents=${IMAGE_NAME}:${IMAGE_TAG}"
+      - "kubectl -n claude-agent rollout status deployment/claude-agent-restricted --timeout=300s"
