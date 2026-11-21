@@ -104,7 +104,7 @@ def test_only_a_real_date_is_accepted(client, today):
 
 
 def test_the_ideas_come_back_from_the_structured_output(client):
-    async def fake(_today):
+    async def fake(_today, *_):
         return datenight_scout.parse_ideas(_cli_output())
 
     with patch.object(datenight_scout, "run_agent", side_effect=fake):
@@ -116,7 +116,7 @@ def test_the_ideas_come_back_from_the_structured_output(client):
 def test_a_second_call_the_same_day_is_served_from_the_cache(client):
     calls = 0
 
-    async def fake(_today):
+    async def fake(_today, *_):
         nonlocal calls
         calls += 1
         return IDEAS
@@ -129,7 +129,7 @@ def test_a_second_call_the_same_day_is_served_from_the_cache(client):
 
 
 def test_a_failed_run_is_502_and_not_cached(client):
-    async def boom(_today):
+    async def boom(_today, *_):
         raise RuntimeError("agent failed")
 
     with patch.object(datenight_scout, "run_agent", side_effect=boom):
@@ -187,7 +187,7 @@ def test_the_environment_holds_only_the_claude_credential():
 
 
 def test_the_prompt_names_the_date_and_only_the_date():
-    p = datenight_scout.prompt("2026-11-22")
+    p = datenight_scout.prompt("2026-11-22", [], False)
     assert "2026-11-22" in p
 
 
@@ -197,3 +197,44 @@ def test_the_shipped_agent_file_parses_with_exactly_the_two_tools():
     with open(os.path.join(here, "agents", "date-scout.md")) as fh:
         agent = parse_agent(fh.read())
     assert tuple(agent["tools"]) == datenight_scout.TOOLS
+
+
+def test_the_prompt_lists_the_venues_to_skip_as_data():
+    p = datenight_scout.prompt("2026-11-22", ["Kiln", "Sadler's Wells"], False)
+    assert "Kiln" in p and "Sadler's Wells" in p
+    assert "data" in p.lower()
+
+
+def test_a_refill_asks_for_other_sources_and_neighbourhoods():
+    assert "refill" in datenight_scout.prompt("2026-11-22", [], True).lower()
+    assert "refill" not in datenight_scout.prompt("2026-11-22", [], False).lower()
+
+
+def test_a_refill_on_the_same_day_is_a_new_run_but_cached_itself(client):
+    calls = []
+
+    async def fake(today, avoid, refill):
+        calls.append((today, refill))
+        return IDEAS
+
+    with patch.object(datenight_scout, "run_agent", side_effect=fake):
+        client.post("/v1/datenight/scout", json={"today": "2026-11-22"}, headers=_auth())
+        client.post("/v1/datenight/scout", json={"today": "2026-11-22", "refill": True}, headers=_auth())
+        client.post("/v1/datenight/scout", json={"today": "2026-11-22", "refill": True}, headers=_auth())
+    assert calls == [("2026-11-22", False), ("2026-11-22", True)]
+
+
+def test_the_avoid_list_is_capped_and_cleaned(client):
+    seen = {}
+
+    async def fake(today, avoid, refill):
+        seen["avoid"] = avoid
+        return IDEAS
+
+    avoid = ["  Kiln  ", "", "x" * 500] + [f"Venue {i}" for i in range(500)]
+    with patch.object(datenight_scout, "run_agent", side_effect=fake):
+        r = client.post("/v1/datenight/scout", json={"today": "2026-11-22", "avoid": avoid}, headers=_auth())
+    assert r.status_code == 200
+    assert seen["avoid"][0] == "Kiln"
+    assert len(seen["avoid"]) <= datenight_scout.MAX_AVOID
+    assert all(0 < len(v) <= 120 for v in seen["avoid"])
