@@ -118,6 +118,7 @@ COPY agents/nextcloud-todos-exec.md /usr/share/agent-seed/nextcloud-todos-exec.m
 COPY agents/tv-report-intake.md /usr/share/agent-seed/tv-report-intake.md
 COPY agents/reels-trending.md /usr/share/agent-seed/reels-trending.md
 COPY agents/date-scout.md /usr/share/agent-seed/date-scout.md
+COPY agents/date-link.md /usr/share/agent-seed/date-link.md
 # The breakglass deployment (separate stack) seeds this one instead of the
 # untrusted-input agents; its init container copies whichever it needs.
 COPY agents/breakglass.md /usr/share/agent-seed/breakglass.md

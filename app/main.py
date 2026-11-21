@@ -18,7 +18,7 @@ from fastapi import FastAPI, HTTPException, Header
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from app import conversational, datenight_scout, intake, no_tools, reels_trending
+from app import conversational, datenight_link, datenight_scout, intake, no_tools, reels_trending
 from app.fixer import config as fixer_config
 from app.fixer import receiver as fixer_receiver
 from app.fixer.runlog import RunLog
@@ -623,6 +623,7 @@ app.include_router(fixer_receiver.router)
 app.include_router(intake.router)
 app.include_router(reels_trending.router)
 app.include_router(datenight_scout.router)
+app.include_router(datenight_link.router)
 fixer_receiver.set_submitter(_submit_fixer_job)
 
 
